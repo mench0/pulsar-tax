@@ -9,6 +9,10 @@ import java.util.Map;
 /** Чтение и проверка полей из разобранного JSON с понятными ошибками. */
 final class Fields {
 
+    /** Целых цифр не больше: 999 млрд — с запасом выше любых порогов. */
+    static final int MAX_INT_DIGITS = 12;
+    static final int MAX_SCALE = 4;
+
     private final Map<String, Object> m;
 
     Fields(Map<String, Object> m) {
@@ -33,13 +37,30 @@ final class Fields {
             if (required) throw new ApiException(400, "Заполните поле «" + key + "»");
             return null;
         }
+        BigDecimal d = null;
         try {
-            if (v instanceof BigDecimal d) return d;
-            if (v instanceof String s) return new BigDecimal(s.trim().replace(',', '.'));
+            if (v instanceof BigDecimal b) d = b;
+            if (v instanceof String s) d = new BigDecimal(s.trim().replace(',', '.'));
         } catch (NumberFormatException ignored) {
             // упадём на общей ошибке ниже
         }
-        throw new ApiException(400, "Поле «" + key + "» должно быть числом");
+        if (d == null) throw new ApiException(400, "Поле «" + key + "» должно быть числом");
+        return limited(key, d);
+    }
+
+    /**
+     * Ограничивает размер числа. Без этого «1e999999999» проходит разбор,
+     * а при записи в JSON превращается в строку из миллиарда цифр.
+     */
+    private static BigDecimal limited(String key, BigDecimal d) {
+        BigDecimal n = d.stripTrailingZeros();
+        if (n.precision() - n.scale() > MAX_INT_DIGITS) {
+            throw new ApiException(400, "Поле «" + key + "» слишком большое");
+        }
+        if (n.scale() > MAX_SCALE) {
+            throw new ApiException(400, "Поле «" + key + "»: не больше " + MAX_SCALE + " знаков после запятой");
+        }
+        return n.scale() < 0 ? n.setScale(0) : n;
     }
 
     LocalDate date(String key, boolean required) {

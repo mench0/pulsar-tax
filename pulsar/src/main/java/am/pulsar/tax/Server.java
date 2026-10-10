@@ -30,12 +30,19 @@ public final class Server {
             "svg", "image/svg+xml",
             "ico", "image/x-icon");
 
+    /** Имена, по которым к серверу на 127.0.0.1 обращается сам браузер пользователя. */
+    private static final Set<String> LOCAL_HOSTS = Set.of("127.0.0.1", "localhost", "[::1]");
+
     private final Store store;
     private final HttpServer http;
+    /** Сервер слушает только этот компьютер — тогда проверяем заголовок Host против DNS rebinding. */
+    private final boolean loopbackOnly;
 
     public Server(Store store, String host, int port) throws IOException {
         this.store = store;
-        this.http = HttpServer.create(new InetSocketAddress(host, port), 0);
+        InetSocketAddress address = new InetSocketAddress(host, port);
+        this.loopbackOnly = address.getAddress() != null && address.getAddress().isLoopbackAddress();
+        this.http = HttpServer.create(address, 0);
         http.createContext("/api/", this::handleApi);
         http.createContext("/", this::handleStatic);
         http.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
@@ -57,6 +64,7 @@ public final class Server {
 
     private void handleApi(HttpExchange ex) throws IOException {
         try {
+            checkRequestSource(ex);
             Object result = route(ex.getRequestMethod(), ex.getRequestURI().getPath(), query(ex), ex);
             if (result == null) {
                 send(ex, 204, null, null);
@@ -81,6 +89,8 @@ public final class Server {
                 return store.profile().toJson();
             case "PUT /api/profile":
                 return store.updateProfile(Codec.profile(body(ex))).toJson();
+            case "GET /api/rules":
+                return TaxRules.toJson(year(q, LocalDate.now()));
             case "GET /api/summary": {
                 LocalDate today = LocalDate.now();
                 int year = year(q, today);
@@ -133,7 +143,35 @@ public final class Server {
         }
     }
 
+    /**
+     * Защита от чужих сайтов, открытых в том же браузере.
+     * Host: сайт, подменивший DNS на 127.0.0.1 (DNS rebinding), присылает своё имя.
+     * Origin: запрос со страницы другого сайта (CSRF) несёт её адрес.
+     */
+    private void checkRequestSource(HttpExchange ex) {
+        String host = ex.getRequestHeaders().getFirst("Host");
+        if (loopbackOnly && (host == null || !LOCAL_HOSTS.contains(hostName(host)))) {
+            throw new ApiException(403, "Запрос с чужого адреса отклонён");
+        }
+        String origin = ex.getRequestHeaders().getFirst("Origin");
+        boolean safe = ex.getRequestMethod().equals("GET") || ex.getRequestMethod().equals("HEAD");
+        if (!safe && origin != null && !origin.equals("http://" + host)) {
+            throw new ApiException(403, "Запрос с другого сайта отклонён");
+        }
+    }
+
+    /** Имя без порта: "localhost:8080" → "localhost", "[::1]:8080" → "[::1]". */
+    private static String hostName(String host) {
+        int colon = host.lastIndexOf(':');
+        return colon > host.lastIndexOf(']') ? host.substring(0, colon) : host;
+    }
+
     private static Map<String, Object> body(HttpExchange ex) throws IOException {
+        // Только JSON: браузер не отправит такой запрос с чужого сайта без разрешения сервера (CORS preflight).
+        String type = ex.getRequestHeaders().getFirst("Content-Type");
+        if (type == null || !type.toLowerCase(Locale.ROOT).startsWith("application/json")) {
+            throw new ApiException(415, "Ожидается Content-Type: application/json");
+        }
         try (InputStream in = ex.getRequestBody()) {
             byte[] bytes = in.readNBytes(MAX_BODY + 1);
             if (bytes.length > MAX_BODY) throw new ApiException(413, "Слишком большой запрос");

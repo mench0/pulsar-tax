@@ -39,6 +39,7 @@ final class Codec {
         i.date = f.date("date", true);
         i.amount = f.dec("amount", true);
         if (i.amount.signum() <= 0) throw new ApiException(400, "Сумма дохода должна быть больше нуля");
+        if (i.amount.scale() > 2) throw new ApiException(400, "Сумма дохода: не больше 2 знаков после запятой");
         i.client = f.str("client", 200, false);
         i.description = f.str("description", 500, false);
         return i;

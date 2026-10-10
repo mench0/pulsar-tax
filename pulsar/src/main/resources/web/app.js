@@ -10,9 +10,17 @@ const REGIMES = {
   GENERAL: 'Общая система',
 };
 const ACTIVITIES = {
-  SERVICES: 'Услуги (10%)',
-  TRADE: 'Торговля (10%)',
-  HIGH_TECH: 'High-Tech, реестр (1%)',
+  SERVICES: 'Услуги',
+  TRADE: 'Торговля',
+  HIGH_TECH: 'High-Tech, реестр',
+  CONSULTING: 'Консультации',
+  ENGINEERING: 'Инжиниринг',
+  MARKETING: 'Реклама и маркетинг',
+  DESIGN: 'Дизайн',
+  TRANSLATION: 'Перевод',
+  LEGAL: 'Юридические услуги',
+  ACCOUNTING: 'Бухгалтерия и аудит',
+  AGENCY: 'Агентская деятельность',
   CUSTOM: 'Своя ставка',
 };
 
@@ -124,7 +132,7 @@ async function overview() {
     <p class="lead">${esc(REGIMES[s.regime])} · ${esc(rateText)} · ${s.year} год</p>
 
     ${needsSetup ? `<div class="alert">Начните с <a href="#/settings">настроек</a>: укажите имя, ИНН и налоговый режим.</div>` : ''}
-    ${s.warnings.map((w) => `<div class="alert ${s.thresholdStatus === 'EXCEEDED' ? 'bad' : ''}">${esc(w)}</div>`).join('')}
+    ${s.warnings.map((w) => `<div class="alert ${s.thresholdStatus === 'EXCEEDED' || !s.regimeAllowed ? 'bad' : ''}">${esc(w)}</div>`).join('')}
 
     <div class="grid cols-3">
       <div class="card">
@@ -408,7 +416,7 @@ async function invoiceView(id) {
   document.getElementById('print').addEventListener('click', () => window.print());
   document.getElementById('paid')?.addEventListener('click', () => markPaid(inv.id));
   document.getElementById('delete').addEventListener('click', () => {
-    if (!confirm(`Удалить счёт ${inv.number}? Записанные доходы останутся.`)) return;
+    if (!confirm(`Удалить счёт ${inv.number}? Доход по его оплате тоже удалится.`)) return;
     guarded(async () => {
       await api('DELETE', `/api/invoices/${inv.id}`);
       toast('Счёт удалён');
@@ -420,7 +428,15 @@ async function invoiceView(id) {
 // ---------- Настройки ----------
 
 async function settings() {
-  const p = await api('GET', '/api/profile');
+  const [p, rules] = await Promise.all([
+    api('GET', '/api/profile'),
+    api('GET', `/api/rules?year=${state.year}`),
+  ]);
+  const byActivity = Object.fromEntries(rules.activities.map((a) => [a.activity, a]));
+  const activityLabels = Object.fromEntries(Object.entries(ACTIVITIES).map(([k, v]) => {
+    const rate = byActivity[k]?.turnoverRate;
+    return [k, rate === null || rate === undefined ? v : `${v} (${rate}%)`];
+  }));
   const options = (map, selected) =>
     Object.entries(map).map(([k, v]) => `<option value="${k}" ${k === selected ? 'selected' : ''}>${esc(v)}</option>`).join('');
 
@@ -442,23 +458,30 @@ async function settings() {
       <h2 style="margin-top:18px">Налоговый режим</h2>
       <div class="row">
         <label class="field">Режим<select name="regime">${options(REGIMES, p.regime)}</select></label>
-        <label class="field">Вид деятельности<select name="activity">${options(ACTIVITIES, p.activity)}</select></label>
+        <label class="field">Вид деятельности<select name="activity">${options(activityLabels, p.activity)}</select></label>
         <label class="field" id="rate-field">Своя ставка, %<input name="customRate" type="number" min="0" max="100" step="0.1" value="${p.customRate ?? ''}"></label>
       </div>
+      <div class="alert" id="regime-check" hidden></div>
       <p class="hint">
-        Микробизнес — оборот до 24 млн ֏ в год, налог с дохода не платится.
-        Налог с оборота — до 115 млн ֏, ставка зависит от деятельности.
-        Режим выбирается заявлением до 20 февраля. Юридические, бухгалтерские и консультационные услуги
-        не могут применять упрощённые режимы.
+        Микробизнес — оборот до ${money.format(rules.microThreshold / 1e6)} млн ֏ в год, налог с дохода не платится.
+        Налог с оборота — до ${money.format(rules.turnoverThreshold / 1e6)} млн ֏, ставка зависит от деятельности.
+        Режим выбирается заявлением до 20 февраля, а при регистрации ИП — в течение 20 дней.
+        Правила ${rules.rulesFromYear} года; сверьте их с бухгалтером или на taxservice.am.
       </p>
       <div class="actions"><button class="btn" type="submit">Сохранить</button></div>
     </form>`;
 
   const form = document.getElementById('profile-form');
   const rateField = document.getElementById('rate-field');
+  const regimeCheck = document.getElementById('regime-check');
   const syncRate = () => {
     rateField.hidden = !(form.regime.value === 'TURNOVER' && form.activity.value === 'CUSTOM');
-    form.activity.disabled = form.regime.value !== 'TURNOVER';
+    const allowed = byActivity[form.activity.value]?.allowedRegimes ?? [];
+    const ok = allowed.includes(form.regime.value);
+    regimeCheck.hidden = ok;
+    regimeCheck.classList.toggle('bad', !ok);
+    regimeCheck.textContent = ok ? '' : `«${ACTIVITIES[form.activity.value]}» не может применять режим «${REGIMES[form.regime.value]}». `
+      + `Доступно: ${allowed.map((r) => REGIMES[r]).join(', ')}.`;
   };
   form.regime.addEventListener('change', syncRate);
   form.activity.addEventListener('change', syncRate);

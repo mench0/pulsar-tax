@@ -1,6 +1,7 @@
 package am.pulsar.tax;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -22,7 +23,12 @@ public final class Model {
         GENERAL
     }
 
-    public enum ActivityType { TRADE, SERVICES, HIGH_TECH, CUSTOM }
+    /** Вид деятельности. От него зависят ставка налога с оборота и доступные режимы (см. TaxRules). */
+    public enum ActivityType {
+        TRADE, SERVICES, HIGH_TECH,
+        CONSULTING, LEGAL, ACCOUNTING, ENGINEERING, MARKETING, DESIGN, TRANSLATION, AGENCY,
+        CUSTOM
+    }
 
     public enum InvoiceStatus { SENT, PAID }
 
@@ -72,8 +78,9 @@ public final class Model {
     }
 
     public record Item(String name, BigDecimal quantity, BigDecimal price) {
+        /** Сумма позиции, округлённая до драма. */
         BigDecimal sum() {
-            return quantity.multiply(price);
+            return quantity.multiply(price).setScale(0, RoundingMode.HALF_UP);
         }
 
         Map<String, Object> toJson() {

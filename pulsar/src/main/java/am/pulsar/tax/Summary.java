@@ -25,7 +25,7 @@ final class Summary {
             byQuarter[q] = byQuarter[q].add(i.amount);
         }
 
-        BigDecimal rate = TaxRules.ratePercent(profile);
+        BigDecimal rate = TaxRules.ratePercent(profile, year);
         BigDecimal total = BigDecimal.ZERO;
         BigDecimal totalTax = rate == null ? null : BigDecimal.ZERO;
         List<Map<String, Object>> quarters = new ArrayList<>();
@@ -41,14 +41,16 @@ final class Summary {
             if (totalTax != null) totalTax = totalTax.add(tax);
         }
 
-        BigDecimal limit = TaxRules.threshold(profile.regime);
+        BigDecimal limit = TaxRules.forYear(year).threshold(profile.regime);
+        String incompatibility = TaxRules.incompatibility(profile, year);
         ThresholdStatus status = TaxRules.status(total, limit);
 
         List<String> warnings = new ArrayList<>();
+        if (incompatibility != null) warnings.add(incompatibility);
         if (profile.regime == TaxRegime.GENERAL) {
             warnings.add("Общая система налогообложения пока не рассчитывается. Для неё нужен бухгалтер.");
         }
-        if (profile.regime == TaxRegime.TURNOVER && rate == null) {
+        if (profile.regime == TaxRegime.TURNOVER && rate == null && incompatibility == null) {
             warnings.add("Укажите ставку налога с оборота в настройках.");
         }
         if (status == ThresholdStatus.WARNING) {
@@ -62,6 +64,7 @@ final class Summary {
         m.put("year", year);
         m.put("regime", profile.regime);
         m.put("activity", profile.activity);
+        m.put("regimeAllowed", incompatibility == null);
         m.put("ratePercent", rate);
         m.put("totalIncome", total);
         m.put("totalTax", totalTax);

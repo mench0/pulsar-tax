@@ -58,8 +58,16 @@ public final class Store {
         return i;
     }
 
+    /** Удаляет доход; если он записан при оплате счёта, счёт снова становится неоплаченным. */
     public synchronized void deleteIncome(long id) {
-        if (!incomes.removeIf(i -> i.id == id)) throw new ApiException(404, "Запись о доходе не найдена");
+        Income income = incomes.stream().filter(i -> i.id == id).findFirst()
+                .orElseThrow(() -> new ApiException(404, "Запись о доходе не найдена"));
+        incomes.remove(income);
+        // Без дохода счёт снова считается неоплаченным, иначе оплату нельзя отметить заново.
+        if (income.invoiceId != null) {
+            invoices.stream().filter(inv -> inv.id == income.invoiceId).findFirst()
+                    .ifPresent(inv -> inv.status = InvoiceStatus.SENT);
+        }
         save();
     }
 
@@ -106,8 +114,11 @@ public final class Store {
         return inv;
     }
 
+    /** Удаляет счёт и доход, записанный при его оплате. */
     public synchronized void deleteInvoice(long id) {
         if (!invoices.removeIf(i -> i.id == id)) throw new ApiException(404, "Счёт не найден");
+        // Доход, записанный при оплате, удаляется вместе со счётом, чтобы не ссылаться на пустоту.
+        incomes.removeIf(i -> i.invoiceId != null && i.invoiceId == id);
         save();
     }
 
