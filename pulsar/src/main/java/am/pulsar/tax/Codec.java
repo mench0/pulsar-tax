@@ -3,6 +3,7 @@ package am.pulsar.tax;
 import am.pulsar.tax.Model.*;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.List;
@@ -33,14 +34,30 @@ final class Codec {
         return p;
     }
 
+    /**
+     * Доход. В драмах передаётся amount; в другой валюте — originalAmount и rate (драмов за единицу),
+     * а сумма в драмах считается здесь и округляется до драма.
+     */
     static Income income(Map<String, Object> json) {
         Fields f = new Fields(json);
         Income i = new Income();
         i.date = f.date("date", true);
-        i.amount = f.dec("amount", true);
+        i.currency = json.get("currency") == null ? Currency.AMD : f.enumValue("currency", Currency.class);
+        if (i.currency == Currency.AMD) {
+            i.amount = f.dec("amount", true);
+        } else {
+            i.originalAmount = f.dec("originalAmount", true);
+            i.rate = f.dec("rate", true);
+            if (i.originalAmount.signum() <= 0) throw new ApiException(400, "Сумма в валюте должна быть больше нуля");
+            if (i.rate.signum() <= 0) throw new ApiException(400, "Курс должен быть больше нуля");
+            i.amount = i.originalAmount.multiply(i.rate).setScale(0, RoundingMode.HALF_UP);
+        }
         if (i.amount.signum() <= 0) throw new ApiException(400, "Сумма дохода должна быть больше нуля");
+        if (i.amount.scale() > 2) throw new ApiException(400, "Сумма дохода: не больше 2 знаков после запятой");
         i.client = f.str("client", 200, false);
         i.description = f.str("description", 500, false);
+        String key = f.str("importKey", 100, false);
+        i.importKey = key.isEmpty() ? null : key;
         return i;
     }
 
@@ -50,12 +67,14 @@ final class Codec {
         Invoice inv = new Invoice();
         inv.number = f.str("number", 50, false);
         LocalDate date = f.date("date", false);
-        inv.date = date != null ? date : LocalDate.now();
+        inv.date = date != null ? date : LocalDate.now(Main.ZONE);
         inv.dueDate = f.date("dueDate", false);
         inv.client = f.str("client", 200, true);
         inv.clientTin = f.str("clientTin", 20, false);
+        inv.eInvoiceNumber = f.str("eInvoiceNumber", 50, false);
         List<Object> rawItems = f.list("items");
         if (rawItems.isEmpty()) throw new ApiException(400, "Добавьте хотя бы одну позицию в счёт");
+        if (rawItems.size() > 200) throw new ApiException(400, "В счёте не больше 200 позиций");
         List<Item> items = new ArrayList<>();
         for (Object o : rawItems) {
             if (!(o instanceof Map)) throw new ApiException(400, "Неверная позиция счёта");
@@ -68,5 +87,24 @@ final class Codec {
         }
         inv.items = items;
         return inv;
+    }
+
+    static TaxPayment taxPayment(Map<String, Object> json) {
+        Fields f = new Fields(json);
+        TaxPayment p = new TaxPayment();
+        BigDecimal year = f.dec("year", true);
+        BigDecimal quarter = f.dec("quarter", true);
+        if (year.scale() > 0 || year.intValue() < 2000 || year.intValue() > 2100) {
+            throw new ApiException(400, "Неверный год");
+        }
+        if (quarter.scale() > 0 || quarter.intValue() < 0 || quarter.intValue() > 4) {
+            throw new ApiException(400, "Квартал должен быть от 1 до 4 (0 — за год)");
+        }
+        p.year = year.intValue();
+        p.quarter = quarter.intValue();
+        p.date = f.date("date", true);
+        p.amount = f.dec("amount", true);
+        if (p.amount.signum() <= 0) throw new ApiException(400, "Сумма уплаты должна быть больше нуля");
+        return p;
     }
 }
