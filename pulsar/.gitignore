@@ -1,0 +1,7 @@
+build/
+data/
+backend/
+*.class
+.idea/
+.vscode/
+.DS_Store
