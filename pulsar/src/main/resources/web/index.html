@@ -17,25 +17,15 @@
       </svg>
       <span class="brand-name">Pulsar <b>Tax</b></span>
     </div>
-    <nav class="tabs" role="tablist">
-      <button class="tab" data-view="overview" role="tab">Обзор</button>
-      <button class="tab" data-view="incomes" role="tab">Доходы</button>
-      <button class="tab" data-view="invoices" role="tab">Счета</button>
-      <button class="tab" data-view="settings" role="tab">Настройки</button>
-    </nav>
-    <label class="year-pick">Год
-      <select id="year"></select>
-    </label>
+    <nav class="tabs" id="tabs" role="tablist"></nav>
+    <div class="topbar-controls" id="topbar-controls"></div>
   </header>
 
   <main id="app" aria-live="polite"></main>
 
   <div id="toast" class="toast" role="status" hidden></div>
 
-  <footer class="footer">
-    Расчёты оценочные и основаны на открытых данных о налогах Армении на 2026 год.
-    Перед уплатой сверяйтесь с taxservice.am или бухгалтером.
-  </footer>
+  <footer class="footer" id="footer"></footer>
 
   <script type="module" src="app.js"></script>
 </body>

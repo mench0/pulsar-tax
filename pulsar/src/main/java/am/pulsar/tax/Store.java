@@ -4,6 +4,7 @@ import am.pulsar.tax.Model.*;
 
 import java.io.IOException;
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -12,9 +13,9 @@ import java.time.LocalDate;
 import java.util.*;
 
 /**
- * Хранилище в одном JSON-файле. Данные держатся в памяти,
- * каждое изменение атомарно записывается на диск.
- * Подходит для одного ИП; при росте заменяется на базу данных.
+ * Данные одного ИП в одном JSON-файле. Данные держатся в памяти,
+ * каждое изменение атомарно записывается на диск. Если запись не удалась,
+ * состояние в памяти откатывается к последнему сохранённому.
  */
 public final class Store {
 
@@ -22,6 +23,7 @@ public final class Store {
     private Profile profile = new Profile();
     private final List<Income> incomes = new ArrayList<>();
     private final List<Invoice> invoices = new ArrayList<>();
+    private final List<TaxPayment> payments = new ArrayList<>();
     private long nextId = 1;
 
     /** file == null — хранить только в памяти (для тестов). */
@@ -51,11 +53,43 @@ public final class Store {
                 .toList();
     }
 
+    public synchronized List<Income> allIncomes() {
+        return incomes.stream()
+                .sorted(Comparator.comparing((Income i) -> i.date).thenComparing(i -> i.id))
+                .toList();
+    }
+
     public synchronized Income addIncome(Income i) {
         i.id = nextId++;
         incomes.add(i);
         save();
         return i;
+    }
+
+    /**
+     * Добавляет доходы из выписки одной записью на диск. Строки с уже известным importKey
+     * пропускаются, поэтому одну и ту же выписку можно загрузить повторно.
+     *
+     * @return {added, skipped}
+     */
+    public synchronized int[] importIncomes(List<Income> list) {
+        Set<String> known = new HashSet<>();
+        for (Income i : incomes) {
+            if (i.importKey != null) known.add(i.importKey);
+        }
+        int added = 0;
+        int skipped = 0;
+        for (Income i : list) {
+            if (i.importKey != null && !known.add(i.importKey)) {
+                skipped++;
+                continue;
+            }
+            i.id = nextId++;
+            incomes.add(i);
+            added++;
+        }
+        if (added > 0) save();
+        return new int[]{added, skipped};
     }
 
     /** Удаляет доход; если он записан при оплате счёта, счёт снова становится неоплаченным. */
@@ -93,6 +127,14 @@ public final class Store {
         }
         inv.id = nextId++;
         invoices.add(inv);
+        save();
+        return inv;
+    }
+
+    /** Записывает номер официального электронного счёта из e-invoice.taxservice.am. */
+    public synchronized Invoice setEInvoiceNumber(long id, String number) {
+        Invoice inv = invoice(id);
+        inv.eInvoiceNumber = number;
         save();
         return inv;
     }
@@ -138,51 +180,123 @@ public final class Store {
         return prefix + String.format("%03d", max + 1);
     }
 
-    // ---------- Файл ----------
+    // ---------- Уплата налога ----------
 
-    private void save() {
-        if (file == null) return;
+    public synchronized List<TaxPayment> payments(int year) {
+        return payments.stream()
+                .filter(p -> p.year == year)
+                .sorted(Comparator.comparing((TaxPayment p) -> p.date).thenComparing(p -> p.id))
+                .toList();
+    }
+
+    public synchronized TaxPayment addPayment(TaxPayment p) {
+        p.id = nextId++;
+        payments.add(p);
+        save();
+        return p;
+    }
+
+    public synchronized void deletePayment(long id) {
+        if (!payments.removeIf(p -> p.id == id)) throw new ApiException(404, "Запись об уплате не найдена");
+        save();
+    }
+
+    // ---------- Экспорт ----------
+
+    /** Все данные в том же виде, что и в файле. */
+    public synchronized Map<String, Object> toJson() {
         Map<String, Object> root = new LinkedHashMap<>();
-        root.put("version", 1);
+        root.put("version", 2);
         root.put("nextId", nextId);
         root.put("profile", profile.toJson());
         root.put("incomes", incomes.stream().map(Income::toJson).toList());
         root.put("invoices", invoices.stream().map(Invoice::toJson).toList());
+        root.put("payments", payments.stream().map(TaxPayment::toJson).toList());
+        return root;
+    }
+
+    // ---------- Файл ----------
+
+    private void save() {
+        if (file == null) return;
         try {
             Path parent = file.toAbsolutePath().getParent();
             Files.createDirectories(parent);
             Path tmp = Files.createTempFile(parent, "pulsar", ".tmp");
-            Files.writeString(tmp, Json.write(root), StandardCharsets.UTF_8);
+            Files.writeString(tmp, Json.write(toJson()), StandardCharsets.UTF_8);
             Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
         } catch (IOException e) {
+            rollback();
             throw new ApiException(500, "Не удалось сохранить данные: " + e.getMessage());
         }
     }
 
+    /** Возвращает память к содержимому файла, чтобы она не расходилась с диском. */
+    private void rollback() {
+        profile = new Profile();
+        incomes.clear();
+        invoices.clear();
+        payments.clear();
+        nextId = 1;
+        if (Files.exists(file)) load();
+    }
+
     @SuppressWarnings("unchecked")
     private void load() {
+        Map<String, Object> root;
         try {
-            Map<String, Object> root = Json.parseObject(Files.readString(file, StandardCharsets.UTF_8));
-            nextId = ((BigDecimal) root.get("nextId")).longValueExact();
-            profile = Codec.profile((Map<String, Object>) root.get("profile"));
-            for (Object o : (List<Object>) root.get("incomes")) {
-                Map<String, Object> m = (Map<String, Object>) o;
-                Income i = Codec.income(m);
-                i.id = ((BigDecimal) m.get("id")).longValueExact();
+            root = Json.parseObject(Files.readString(file, StandardCharsets.UTF_8));
+        } catch (IOException | IllegalArgumentException e) {
+            throw new IllegalStateException("Не удалось прочитать " + file + ": " + e.getMessage(), e);
+        }
+        try {
+            nextId = longValue(root.get("nextId"), 1);
+            if (root.get("profile") instanceof Map<?, ?> p) profile = Codec.profile((Map<String, Object>) p);
+            for (Map<String, Object> m : objects(root.get("incomes"))) {
+                // Файлы до округления до драма могли содержать суммы с 4 знаками.
+                Map<String, Object> c = new HashMap<>(m);
+                if (c.get("amount") instanceof BigDecimal a && a.scale() > 2) c.put("amount", a.setScale(2, RoundingMode.HALF_UP));
+                Income i = Codec.income(c);
+                i.amount = (BigDecimal) c.get("amount");
+                i.id = longValue(m.get("id"), 0);
                 Object inv = m.get("invoiceId");
-                i.invoiceId = inv == null ? null : ((BigDecimal) inv).longValueExact();
+                i.invoiceId = inv == null ? null : longValue(inv, 0);
                 incomes.add(i);
             }
-            for (Object o : (List<Object>) root.get("invoices")) {
-                Map<String, Object> m = (Map<String, Object>) o;
+            for (Map<String, Object> m : objects(root.get("invoices"))) {
                 Invoice inv = Codec.invoice(m);
-                inv.id = ((BigDecimal) m.get("id")).longValueExact();
+                inv.id = longValue(m.get("id"), 0);
                 inv.number = (String) m.get("number");
                 inv.status = InvoiceStatus.valueOf((String) m.get("status"));
                 invoices.add(inv);
             }
-        } catch (IOException e) {
-            throw new IllegalStateException("Не удалось прочитать " + file + ": " + e.getMessage(), e);
+            for (Map<String, Object> m : objects(root.get("payments"))) {
+                TaxPayment p = Codec.taxPayment(m);
+                p.id = longValue(m.get("id"), 0);
+                payments.add(p);
+            }
+        } catch (RuntimeException e) {
+            throw new IllegalStateException("Файл " + file + " повреждён: " + e.getMessage()
+                    + ". Восстановите его из папки backups.", e);
         }
+        long maxId = 0;
+        for (Income i : incomes) maxId = Math.max(maxId, i.id);
+        for (Invoice i : invoices) maxId = Math.max(maxId, i.id);
+        for (TaxPayment p : payments) maxId = Math.max(maxId, p.id);
+        nextId = Math.max(nextId, maxId + 1);
+    }
+
+    private static long longValue(Object v, long def) {
+        return v instanceof BigDecimal d ? d.longValueExact() : def;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static List<Map<String, Object>> objects(Object v) {
+        if (!(v instanceof List<?> l)) return List.of();
+        List<Map<String, Object>> out = new ArrayList<>();
+        for (Object o : l) {
+            if (o instanceof Map<?, ?> m) out.add((Map<String, Object>) m);
+        }
+        return out;
     }
 }

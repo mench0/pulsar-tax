@@ -2,7 +2,7 @@ package am.pulsar.tax;
 
 import am.pulsar.tax.Model.Income;
 import am.pulsar.tax.Model.Invoice;
-import am.pulsar.tax.Model.Profile;
+import am.pulsar.tax.Model.TaxPayment;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 
@@ -18,32 +18,53 @@ import java.util.concurrent.Executors;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-/** HTTP-сервер: REST API под /api и статический фронтенд из ресурсов /web. */
+/** HTTP-сервер: REST API под /api, календарь под /cal и статический фронтенд из ресурсов /web. */
 public final class Server {
 
-    private static final int MAX_BODY = 1_000_000;
-    private static final Pattern ID_PATH = Pattern.compile("^/api/(incomes|invoices)/(\\d+)(/paid)?$");
+    /** Настройки сервера: cookie только по HTTPS и открыта ли регистрация новых пользователей. */
+    public record Options(boolean secureCookie, boolean signupOpen) {
+        public static final Options DEFAULT = new Options(false, true);
+    }
+
+    /** Ответ с явным HTTP-статусом. */
+    private record Reply(int status, Object body) {
+    }
+
+    /** Ответ-файл: CSV, JSON для скачивания или календарь. */
+    private record Raw(String type, String body, String filename) {
+    }
+
+    private static final int MAX_BODY = 2_000_000;
+    private static final int MAX_IMPORT = 5000;
+    private static final String COOKIE = "pulsar_session";
+    private static final Pattern ID_PATH =
+            Pattern.compile("^/api/(incomes|invoices|payments)/(\\d+)(/paid|/einvoice)?$");
+    private static final Pattern CAL_PATH = Pattern.compile("^/cal/([0-9a-f]{40})\\.ics$");
     private static final Map<String, String> MIME = Map.of(
             "html", "text/html; charset=utf-8",
             "css", "text/css; charset=utf-8",
             "js", "text/javascript; charset=utf-8",
             "svg", "image/svg+xml",
             "ico", "image/x-icon");
-
     /** Имена, по которым к серверу на 127.0.0.1 обращается сам браузер пользователя. */
     private static final Set<String> LOCAL_HOSTS = Set.of("127.0.0.1", "localhost", "[::1]");
 
-    private final Store store;
+    private final Accounts accounts;
+    private final Telegram telegram;
+    private final Options options;
     private final HttpServer http;
     /** Сервер слушает только этот компьютер — тогда проверяем заголовок Host против DNS rebinding. */
     private final boolean loopbackOnly;
 
-    public Server(Store store, String host, int port) throws IOException {
-        this.store = store;
+    public Server(Accounts accounts, Telegram telegram, Options options, String host, int port) throws IOException {
+        this.accounts = accounts;
+        this.telegram = telegram;
+        this.options = options;
         InetSocketAddress address = new InetSocketAddress(host, port);
         this.loopbackOnly = address.getAddress() != null && address.getAddress().isLoopbackAddress();
         this.http = HttpServer.create(address, 0);
         http.createContext("/api/", this::handleApi);
+        http.createContext("/cal/", this::handleCalendar);
         http.createContext("/", this::handleStatic);
         http.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
     }
@@ -66,12 +87,18 @@ public final class Server {
         try {
             checkRequestSource(ex);
             Object result = route(ex.getRequestMethod(), ex.getRequestURI().getPath(), query(ex), ex);
+            ex.getResponseHeaders().set("Cache-Control", "no-store");
             if (result == null) {
                 send(ex, 204, null, null);
+            } else if (result instanceof Raw raw) {
+                if (raw.filename != null) {
+                    ex.getResponseHeaders().set("Content-Disposition", "attachment; filename=\"" + raw.filename + "\"");
+                }
+                send(ex, 200, raw.type, raw.body);
+            } else if (result instanceof Reply r) {
+                send(ex, r.status, "application/json; charset=utf-8", Json.write(r.body));
             } else {
-                int status = "POST".equals(ex.getRequestMethod()) && !ex.getRequestURI().getPath().endsWith("/paid")
-                        ? 201 : 200;
-                send(ex, status, "application/json; charset=utf-8", Json.write(result));
+                send(ex, 200, "application/json; charset=utf-8", Json.write(result));
             }
         } catch (ApiException e) {
             sendError(ex, e.status, e.getMessage());
@@ -84,26 +111,91 @@ public final class Server {
     }
 
     private Object route(String method, String path, Map<String, String> q, HttpExchange ex) throws IOException {
+        // Без входа доступны только вход, регистрация и справочник правил.
         switch (method + " " + path) {
+            case "POST /api/auth/register": {
+                Map<String, Object> b = body(ex);
+                if (!options.signupOpen && !accounts.users().isEmpty()) {
+                    throw new ApiException(403, "Регистрация закрыта");
+                }
+                Accounts.User u = accounts.register(str(b.get("email")), str(b.get("password")));
+                if (b.get("lang") instanceof String l && Accounts.LANGUAGES.contains(l)) accounts.setLang(u, l);
+                setSession(ex, accounts.newSession(u));
+                return new Reply(201, me(u));
+            }
+            case "POST /api/auth/login": {
+                Map<String, Object> b = body(ex);
+                String token = accounts.login(str(b.get("email")), str(b.get("password")));
+                setSession(ex, token);
+                return me(accounts.bySession(token));
+            }
+            case "POST /api/auth/logout":
+                accounts.logout(sessionToken(ex));
+                ex.getResponseHeaders().add("Set-Cookie", COOKIE + "=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict"
+                        + (options.secureCookie ? "; Secure" : ""));
+                return null;
+            case "GET /api/rules":
+                return TaxRules.toJson(year(q, today()));
+            default:
+                break;
+        }
+
+        Accounts.User user = accounts.bySession(sessionToken(ex));
+        if (user == null) throw new ApiException(401, "Войдите в Pulsar Tax");
+        Store store = accounts.store(user);
+
+        switch (method + " " + path) {
+            case "GET /api/auth/me":
+                return me(user);
+            case "PUT /api/account": {
+                Map<String, Object> b = body(ex);
+                accounts.setLang(user, str(b.get("lang")));
+                return me(user);
+            }
+            case "POST /api/account/password": {
+                Map<String, Object> b = body(ex);
+                accounts.changePassword(user, str(b.get("oldPassword")), str(b.get("newPassword")));
+                setSession(ex, accounts.newSession(user));
+                return me(user);
+            }
+            case "POST /api/account/telegram": {
+                if (telegram == null) throw new ApiException(400, "Telegram на этом сервере не настроен");
+                if (telegram.username() == null) throw new ApiException(503, "Бот Telegram ещё запускается, попробуйте через минуту");
+                String code = accounts.telegramCode(user);
+                return Map.of("code", code, "link", "https://t.me/" + telegram.username() + "?start=" + code);
+            }
+            case "DELETE /api/account/telegram":
+                accounts.unlinkTelegram(user);
+                return me(user);
             case "GET /api/profile":
                 return store.profile().toJson();
             case "PUT /api/profile":
                 return store.updateProfile(Codec.profile(body(ex))).toJson();
-            case "GET /api/rules":
-                return TaxRules.toJson(year(q, LocalDate.now()));
             case "GET /api/summary": {
-                LocalDate today = LocalDate.now();
+                LocalDate today = today();
                 int year = year(q, today);
-                return Summary.build(store.profile(), store.incomes(year), year, today);
+                return Summary.build(store.profile(), store.incomes(year), store.payments(year), year, today);
             }
             case "GET /api/incomes":
-                return store.incomes(year(q, LocalDate.now())).stream().map(Income::toJson).toList();
+                return store.incomes(year(q, today())).stream().map(Income::toJson).toList();
             case "POST /api/incomes":
-                return store.addIncome(Codec.income(body(ex))).toJson();
+                return new Reply(201, store.addIncome(Codec.income(body(ex))).toJson());
+            case "POST /api/incomes/import":
+                return importIncomes(store, body(ex));
             case "GET /api/invoices":
                 return store.invoices().stream().map(Invoice::toJson).toList();
             case "POST /api/invoices":
-                return store.addInvoice(Codec.invoice(body(ex))).toJson();
+                return new Reply(201, store.addInvoice(Codec.invoice(body(ex))).toJson());
+            case "GET /api/payments":
+                return store.payments(year(q, today())).stream().map(TaxPayment::toJson).toList();
+            case "POST /api/payments":
+                return new Reply(201, store.addPayment(Codec.taxPayment(body(ex))).toJson());
+            case "GET /api/export/data.json":
+                return new Raw("application/json; charset=utf-8", Json.write(store.toJson()), "pulsar-tax.json");
+            case "GET /api/export/incomes.csv":
+                return new Raw("text/csv; charset=utf-8", Csv.incomes(store.allIncomes()), "incomes.csv");
+            case "GET /api/export/invoices.csv":
+                return new Raw("text/csv; charset=utf-8", Csv.invoices(store.invoices()), "invoices.csv");
             default:
                 break;
         }
@@ -111,24 +203,69 @@ public final class Server {
         Matcher m = ID_PATH.matcher(path);
         if (m.matches()) {
             long id = Long.parseLong(m.group(2));
-            boolean incomesPath = m.group(1).equals("incomes");
-            boolean paid = m.group(3) != null;
-            if (incomesPath && !paid && method.equals("DELETE")) {
-                store.deleteIncome(id);
-                return null;
-            }
-            if (!incomesPath && !paid && method.equals("GET")) return store.invoice(id).toJson();
-            if (!incomesPath && !paid && method.equals("DELETE")) {
-                store.deleteInvoice(id);
-                return null;
-            }
-            if (!incomesPath && paid && method.equals("POST")) {
-                LocalDate date = q.containsKey("date") ? new Fields(Map.of("date", q.get("date"))).date("date", true)
-                        : LocalDate.now();
-                return store.markPaid(id, date).toJson();
+            String kind = m.group(1);
+            String action = m.group(3) == null ? "" : m.group(3);
+            switch (kind + action + " " + method) {
+                case "incomes DELETE":
+                    store.deleteIncome(id);
+                    return null;
+                case "payments DELETE":
+                    store.deletePayment(id);
+                    return null;
+                case "invoices GET":
+                    return store.invoice(id).toJson();
+                case "invoices DELETE":
+                    store.deleteInvoice(id);
+                    return null;
+                case "invoices/paid POST": {
+                    LocalDate date = q.containsKey("date")
+                            ? new Fields(Map.of("date", q.get("date"))).date("date", true) : today();
+                    return store.markPaid(id, date).toJson();
+                }
+                case "invoices/einvoice PUT": {
+                    String number = new Fields(body(ex)).str("eInvoiceNumber", 50, false);
+                    return store.setEInvoiceNumber(id, number).toJson();
+                }
+                default:
+                    break;
             }
         }
         throw new ApiException(404, "Метод не найден: " + method + " " + path);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> importIncomes(Store store, Map<String, Object> b) {
+        List<Object> raw = new Fields(b).list("items");
+        if (raw.size() > MAX_IMPORT) throw new ApiException(400, "За раз можно загрузить не больше " + MAX_IMPORT + " строк");
+        List<Income> list = new ArrayList<>();
+        for (int n = 0; n < raw.size(); n++) {
+            if (!(raw.get(n) instanceof Map<?, ?> item)) throw new ApiException(400, "Строка " + (n + 1) + ": неверный формат");
+            try {
+                list.add(Codec.income((Map<String, Object>) item));
+            } catch (ApiException e) {
+                throw new ApiException(400, "Строка " + (n + 1) + ": " + e.getMessage());
+            }
+        }
+        int[] r = store.importIncomes(list);
+        return Map.of("added", r[0], "skipped", r[1]);
+    }
+
+    private Map<String, Object> me(Accounts.User u) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("email", u.email());
+        m.put("lang", u.lang());
+        m.put("telegramEnabled", telegram != null);
+        m.put("telegramLinked", u.telegramChatId() != null);
+        m.put("calendarPath", "/cal/" + u.calendarToken() + ".ics");
+        return m;
+    }
+
+    private static LocalDate today() {
+        return LocalDate.now(Main.ZONE);
+    }
+
+    private static String str(Object v) {
+        return v instanceof String s ? s : "";
     }
 
     private static int year(Map<String, String> q, LocalDate today) {
@@ -143,6 +280,23 @@ public final class Server {
         }
     }
 
+    // ---------- Сессия ----------
+
+    private void setSession(HttpExchange ex, String token) {
+        ex.getResponseHeaders().add("Set-Cookie", COOKIE + "=" + token + "; Path=/; Max-Age="
+                + Accounts.SESSION_DAYS * 86400 + "; HttpOnly; SameSite=Strict" + (options.secureCookie ? "; Secure" : ""));
+    }
+
+    private static String sessionToken(HttpExchange ex) {
+        for (String header : ex.getRequestHeaders().getOrDefault("Cookie", List.of())) {
+            for (String part : header.split(";")) {
+                String p = part.trim();
+                if (p.startsWith(COOKIE + "=")) return p.substring(COOKIE.length() + 1);
+            }
+        }
+        return null;
+    }
+
     /**
      * Защита от чужих сайтов, открытых в том же браузере.
      * Host: сайт, подменивший DNS на 127.0.0.1 (DNS rebinding), присылает своё имя.
@@ -155,7 +309,7 @@ public final class Server {
         }
         String origin = ex.getRequestHeaders().getFirst("Origin");
         boolean safe = ex.getRequestMethod().equals("GET") || ex.getRequestMethod().equals("HEAD");
-        if (!safe && origin != null && !origin.equals("http://" + host)) {
+        if (!safe && origin != null && !origin.equals("http://" + host) && !origin.equals("https://" + host)) {
             throw new ApiException(403, "Запрос с другого сайта отклонён");
         }
     }
@@ -192,6 +346,20 @@ public final class Server {
         return q;
     }
 
+    // ---------- Календарь ----------
+
+    /** Подписка на календарь по секретной ссылке: календари не умеют передавать cookie. */
+    private void handleCalendar(HttpExchange ex) throws IOException {
+        Matcher m = CAL_PATH.matcher(ex.getRequestURI().getPath());
+        Accounts.User u = m.matches() && ex.getRequestMethod().equals("GET") ? accounts.byCalendarToken(m.group(1)) : null;
+        if (u == null) {
+            send(ex, 404, "text/plain; charset=utf-8", "Not found");
+            return;
+        }
+        ex.getResponseHeaders().set("Content-Disposition", "inline; filename=\"pulsar-tax.ics\"");
+        send(ex, 200, "text/calendar; charset=utf-8", Deadlines.ics(accounts.store(u).profile(), u.lang(), today()));
+    }
+
     // ---------- Статика ----------
 
     private void handleStatic(HttpExchange ex) throws IOException {
@@ -215,6 +383,8 @@ public final class Server {
             byte[] bytes = in.readAllBytes();
             ex.getResponseHeaders().set("Content-Type", MIME.get(ext));
             ex.getResponseHeaders().set("Cache-Control", "no-cache");
+            ex.getResponseHeaders().set("X-Content-Type-Options", "nosniff");
+            ex.getResponseHeaders().set("X-Frame-Options", "DENY");
             ex.sendResponseHeaders(200, ex.getRequestMethod().equals("HEAD") ? -1 : bytes.length);
             if (!ex.getRequestMethod().equals("HEAD")) {
                 try (OutputStream out = ex.getResponseBody()) {

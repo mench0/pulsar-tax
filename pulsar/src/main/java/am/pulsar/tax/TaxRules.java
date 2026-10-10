@@ -111,30 +111,9 @@ public final class TaxRules {
         };
     }
 
-    /** Текст проблемы, если вид деятельности не может применять выбранный режим; иначе null. */
-    public static String incompatibility(Profile p, int year) {
-        YearRules r = forYear(year);
-        if (r.allowed(p.activity, p.regime)) return null;
-        String regime = p.regime == TaxRegime.MICRO ? "микробизнес" : "налог с оборота";
-        return "Вид деятельности «" + activityName(p.activity) + "» не может применять " + regime
-                + " в " + year + " году. Проверьте режим с бухгалтером или в налоговой: иначе возможны доначисления и штрафы.";
-    }
-
-    static String activityName(ActivityType a) {
-        return switch (a) {
-            case TRADE -> "торговля";
-            case SERVICES -> "услуги";
-            case HIGH_TECH -> "High-Tech";
-            case CONSULTING -> "консультации";
-            case LEGAL -> "юридические услуги";
-            case ACCOUNTING -> "бухгалтерия и аудит";
-            case ENGINEERING -> "инжиниринг";
-            case MARKETING -> "реклама и маркетинг";
-            case DESIGN -> "дизайн";
-            case TRANSLATION -> "перевод";
-            case AGENCY -> "агентская деятельность";
-            case CUSTOM -> "своя ставка";
-        };
+    /** Может ли вид деятельности из профиля применять выбранный в нём режим. */
+    public static boolean regimeAllowed(Profile p, int year) {
+        return forYear(year).allowed(p.activity, p.regime);
     }
 
     /** Налог с оборота, округлённый до драма; null, если ставки нет. */
