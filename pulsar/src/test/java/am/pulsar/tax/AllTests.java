@@ -56,6 +56,7 @@ public final class AllTests {
         run("API: правила, импорт, экспорт, календарь", AllTests::apiMisc);
         run("API: CORS для отдельного фронтенда", AllTests::apiCors);
         run("Настройки cookie", AllTests::cookieOptions);
+        run("API: вход по токену для мобильного приложения", AllTests::apiBearerToken);
         System.out.println();
         System.out.println("Пройдено: " + passed + ", упало: " + failed);
         if (failed > 0) System.exit(1);
@@ -755,5 +756,38 @@ public final class AllTests {
             return;
         }
         throw new AssertionError("ожидалась IllegalArgumentException");
+    }
+
+    static void apiBearerToken() throws Exception {
+        try (Env env = Env.start()) {
+            HttpResponse<String> reg = env.call("POST", "/api/auth/register",
+                    "{\"email\":\"app@example.am\",\"password\":\"пароль-для-теста\",\"tokenAuth\":true}");
+            eq(201, reg.statusCode());
+            eq(true, reg.headers().firstValue("Set-Cookie").isEmpty()); // приложению cookie не нужна
+            String token = (String) Json.parseObject(reg.body()).get("token");
+            eq(64, token.length());
+
+            Env app = env.anotherUser(); // без cookie
+            eq(401, app.call("GET", "/api/profile", null).statusCode());
+            String auth = "Bearer " + token;
+            eq(200, app.call("GET", "/api/profile", null, "Authorization", auth).statusCode());
+            eq(201, app.call("POST", "/api/incomes", "{\"date\":\"2026-01-01\",\"amount\":5}",
+                    "Content-Type", "application/json", "Authorization", auth).statusCode());
+            eq(401, app.call("GET", "/api/profile", null, "Authorization", "Bearer " + "0".repeat(64)).statusCode());
+
+            // Вход по паролю тоже отдаёт токен; смена пароля — новый токен, старый перестаёт работать.
+            HttpResponse<String> login = app.call("POST", "/api/auth/login",
+                    "{\"email\":\"app@example.am\",\"password\":\"пароль-для-теста\",\"tokenAuth\":true}");
+            String token2 = (String) Json.parseObject(login.body()).get("token");
+            HttpResponse<String> pw = app.call("POST", "/api/account/password",
+                    "{\"oldPassword\":\"пароль-для-теста\",\"newPassword\":\"новый-пароль-1\"}",
+                    "Content-Type", "application/json", "Authorization", "Bearer " + token2);
+            String token3 = (String) Json.parseObject(pw.body()).get("token");
+            eq(true, token3 != null && !token3.equals(token2));
+            eq(401, app.call("GET", "/api/profile", null, "Authorization", "Bearer " + token2).statusCode());
+            eq(200, app.call("GET", "/api/profile", null, "Authorization", "Bearer " + token3).statusCode());
+            eq(204, app.call("POST", "/api/auth/logout", null, "Authorization", "Bearer " + token3).statusCode());
+            eq(401, app.call("GET", "/api/profile", null, "Authorization", "Bearer " + token3).statusCode());
+        }
     }
 }

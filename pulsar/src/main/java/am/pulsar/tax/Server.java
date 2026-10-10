@@ -137,14 +137,12 @@ public final class Server {
                 }
                 Accounts.User u = accounts.register(str(b.get("email")), str(b.get("password")));
                 if (b.get("lang") instanceof String l && Accounts.LANGUAGES.contains(l)) accounts.setLang(u, l);
-                setSession(ex, accounts.newSession(u));
-                return new Reply(201, me(u));
+                return new Reply(201, issueSession(ex, tokenAuth(b), accounts.newSession(u), u));
             }
             case "POST /api/auth/login": {
                 Map<String, Object> b = body(ex);
                 String token = accounts.login(str(b.get("email")), str(b.get("password")));
-                setSession(ex, token);
-                return me(accounts.bySession(token));
+                return issueSession(ex, tokenAuth(b), token, accounts.bySession(token));
             }
             case "POST /api/auth/logout":
                 accounts.logout(sessionToken(ex));
@@ -171,8 +169,7 @@ public final class Server {
             case "POST /api/account/password": {
                 Map<String, Object> b = body(ex);
                 accounts.changePassword(user, str(b.get("oldPassword")), str(b.get("newPassword")));
-                setSession(ex, accounts.newSession(user));
-                return me(user);
+                return issueSession(ex, bearer(ex) != null, accounts.newSession(user), user);
             }
             case "POST /api/account/telegram": {
                 if (telegram == null) throw new ApiException(400, "Telegram на этом сервере не настроен");
@@ -298,8 +295,27 @@ public final class Server {
 
     // ---------- Сессия ----------
 
-    private void setSession(HttpExchange ex, String token) {
-        ex.getResponseHeaders().add("Set-Cookie", cookie(token, Accounts.SESSION_DAYS * 86400));
+    /**
+     * Выдаёт сессию. Браузеру — в cookie HttpOnly, чтобы скрипт страницы не мог её прочитать.
+     * Мобильному приложению (tokenAuth) — токеном в ответе: дальше оно шлёт его в Authorization: Bearer.
+     */
+    private Map<String, Object> issueSession(HttpExchange ex, boolean tokenAuth, String token, Accounts.User u) {
+        Map<String, Object> m = me(u);
+        if (tokenAuth) {
+            m.put("token", token);
+        } else {
+            ex.getResponseHeaders().add("Set-Cookie", cookie(token, Accounts.SESSION_DAYS * 86400));
+        }
+        return m;
+    }
+
+    private static boolean tokenAuth(Map<String, Object> body) {
+        return Boolean.TRUE.equals(body.get("tokenAuth"));
+    }
+
+    private static String bearer(HttpExchange ex) {
+        String h = ex.getRequestHeaders().getFirst("Authorization");
+        return h != null && h.regionMatches(true, 0, "Bearer ", 0, 7) ? h.substring(7).trim() : null;
     }
 
     private String cookie(String value, long maxAge) {
@@ -307,7 +323,10 @@ public final class Server {
                 + (options.secureCookie ? "; Secure" : "");
     }
 
+    /** Токен сессии: из Authorization: Bearer (приложение) или из cookie (браузер). */
     private static String sessionToken(HttpExchange ex) {
+        String b = bearer(ex);
+        if (b != null) return b;
         for (String header : ex.getRequestHeaders().getOrDefault("Cookie", List.of())) {
             for (String part : header.split(";")) {
                 String p = part.trim();
@@ -368,7 +387,7 @@ public final class Server {
         if (!ex.getRequestMethod().equals("OPTIONS")) return false;
         if (!allowed) throw new ApiException(403, "Запрос с другого сайта отклонён");
         ex.getResponseHeaders().set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE");
-        ex.getResponseHeaders().set("Access-Control-Allow-Headers", "Content-Type");
+        ex.getResponseHeaders().set("Access-Control-Allow-Headers", "Content-Type, Authorization");
         ex.getResponseHeaders().set("Access-Control-Max-Age", "600");
         send(ex, 204, null, null);
         return true;
