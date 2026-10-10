@@ -10,6 +10,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
+import java.net.URI;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.time.LocalDate;
@@ -18,12 +19,33 @@ import java.util.concurrent.Executors;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-/** HTTP-сервер: REST API под /api, календарь под /cal и статический фронтенд из ресурсов /web. */
+/**
+ * HTTP-сервер: REST API под /api и календарь под /cal. Фронтенд живёт в отдельном репозитории
+ * (pulsar-tax-web) и обращается к API с других адресов, поэтому здесь CORS со списком разрешённых адресов.
+ */
 public final class Server {
 
-    /** Настройки сервера: cookie только по HTTPS и открыта ли регистрация новых пользователей. */
-    public record Options(boolean secureCookie, boolean signupOpen) {
-        public static final Options DEFAULT = new Options(false, true);
+    /**
+     * Настройки сервера.
+     *
+     * @param secureCookie   cookie только по HTTPS
+     * @param signupOpen     открыта ли регистрация новых пользователей
+     * @param sameSite       атрибут SameSite у cookie: Strict, если фронтенд на том же сайте
+     *                       (app.example.am и api.example.am), None — если на другом домене
+     * @param allowedOrigins адреса фронтенда, которым разрешены запросы с cookie (CORS)
+     */
+    public record Options(boolean secureCookie, boolean signupOpen, String sameSite, Set<String> allowedOrigins) {
+        public static final Options DEFAULT = new Options(false, true, "Strict", Set.of());
+
+        public Options {
+            if (!Set.of("Strict", "Lax", "None").contains(sameSite)) {
+                throw new IllegalArgumentException("SameSite должен быть Strict, Lax или None: " + sameSite);
+            }
+            if (sameSite.equals("None") && !secureCookie) {
+                throw new IllegalArgumentException("SameSite=None работает только с Secure: включите PULSAR_SECURE_COOKIE=1");
+            }
+            allowedOrigins = Set.copyOf(allowedOrigins);
+        }
     }
 
     /** Ответ с явным HTTP-статусом. */
@@ -40,12 +62,6 @@ public final class Server {
     private static final Pattern ID_PATH =
             Pattern.compile("^/api/(incomes|invoices|payments)/(\\d+)(/paid|/einvoice)?$");
     private static final Pattern CAL_PATH = Pattern.compile("^/cal/([0-9a-f]{40})\\.ics$");
-    private static final Map<String, String> MIME = Map.of(
-            "html", "text/html; charset=utf-8",
-            "css", "text/css; charset=utf-8",
-            "js", "text/javascript; charset=utf-8",
-            "svg", "image/svg+xml",
-            "ico", "image/x-icon");
     /** Имена, по которым к серверу на 127.0.0.1 обращается сам браузер пользователя. */
     private static final Set<String> LOCAL_HOSTS = Set.of("127.0.0.1", "localhost", "[::1]");
 
@@ -65,7 +81,7 @@ public final class Server {
         this.http = HttpServer.create(address, 0);
         http.createContext("/api/", this::handleApi);
         http.createContext("/cal/", this::handleCalendar);
-        http.createContext("/", this::handleStatic);
+        http.createContext("/", this::handleRoot);
         http.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
     }
 
@@ -86,6 +102,7 @@ public final class Server {
     private void handleApi(HttpExchange ex) throws IOException {
         try {
             checkRequestSource(ex);
+            if (cors(ex)) return;
             Object result = route(ex.getRequestMethod(), ex.getRequestURI().getPath(), query(ex), ex);
             ex.getResponseHeaders().set("Cache-Control", "no-store");
             if (result == null) {
@@ -131,8 +148,7 @@ public final class Server {
             }
             case "POST /api/auth/logout":
                 accounts.logout(sessionToken(ex));
-                ex.getResponseHeaders().add("Set-Cookie", COOKIE + "=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict"
-                        + (options.secureCookie ? "; Secure" : ""));
+                ex.getResponseHeaders().add("Set-Cookie", cookie("", 0));
                 return null;
             case "GET /api/rules":
                 return TaxRules.toJson(year(q, today()));
@@ -283,8 +299,12 @@ public final class Server {
     // ---------- Сессия ----------
 
     private void setSession(HttpExchange ex, String token) {
-        ex.getResponseHeaders().add("Set-Cookie", COOKIE + "=" + token + "; Path=/; Max-Age="
-                + Accounts.SESSION_DAYS * 86400 + "; HttpOnly; SameSite=Strict" + (options.secureCookie ? "; Secure" : ""));
+        ex.getResponseHeaders().add("Set-Cookie", cookie(token, Accounts.SESSION_DAYS * 86400));
+    }
+
+    private String cookie(String value, long maxAge) {
+        return COOKIE + "=" + value + "; Path=/; Max-Age=" + maxAge + "; HttpOnly; SameSite=" + options.sameSite
+                + (options.secureCookie ? "; Secure" : "");
     }
 
     private static String sessionToken(HttpExchange ex) {
@@ -309,9 +329,49 @@ public final class Server {
         }
         String origin = ex.getRequestHeaders().getFirst("Origin");
         boolean safe = ex.getRequestMethod().equals("GET") || ex.getRequestMethod().equals("HEAD");
-        if (!safe && origin != null && !origin.equals("http://" + host) && !origin.equals("https://" + host)) {
+        if (!safe && origin != null && !originAllowed(origin, host)) {
             throw new ApiException(403, "Запрос с другого сайта отклонён");
         }
+    }
+
+    /**
+     * Разрешён ли адрес страницы: свой адрес, адрес из PULSAR_ALLOWED_ORIGINS, а при работе
+     * только на этом компьютере — любой локальный адрес (фронтенд при разработке на другом порту).
+     */
+    boolean originAllowed(String origin, String host) {
+        if (origin.equals("http://" + host) || origin.equals("https://" + host)) return true;
+        if (options.allowedOrigins.contains(origin)) return true;
+        if (!loopbackOnly) return false;
+        try {
+            URI u = URI.create(origin);
+            return "http".equals(u.getScheme()) && u.getHost() != null
+                    && LOCAL_HOSTS.contains(u.getHost()); // у IPv6 getHost() уже в скобках
+        } catch (IllegalArgumentException e) {
+            return false;
+        }
+    }
+
+    /**
+     * Заголовки CORS для разрешённого фронтенда. Отвечает на предварительный запрос OPTIONS
+     * и возвращает true, если ответ уже отправлен.
+     */
+    private boolean cors(HttpExchange ex) throws IOException {
+        String origin = ex.getRequestHeaders().getFirst("Origin");
+        String host = ex.getRequestHeaders().getFirst("Host");
+        boolean allowed = origin != null && originAllowed(origin, host);
+        ex.getResponseHeaders().add("Vary", "Origin");
+        if (allowed) {
+            ex.getResponseHeaders().set("Access-Control-Allow-Origin", origin);
+            ex.getResponseHeaders().set("Access-Control-Allow-Credentials", "true");
+            ex.getResponseHeaders().set("Access-Control-Expose-Headers", "Content-Disposition");
+        }
+        if (!ex.getRequestMethod().equals("OPTIONS")) return false;
+        if (!allowed) throw new ApiException(403, "Запрос с другого сайта отклонён");
+        ex.getResponseHeaders().set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE");
+        ex.getResponseHeaders().set("Access-Control-Allow-Headers", "Content-Type");
+        ex.getResponseHeaders().set("Access-Control-Max-Age", "600");
+        send(ex, 204, null, null);
+        return true;
     }
 
     /** Имя без порта: "localhost:8080" → "localhost", "[::1]:8080" → "[::1]". */
@@ -360,38 +420,15 @@ public final class Server {
         send(ex, 200, "text/calendar; charset=utf-8", Deadlines.ics(accounts.store(u).profile(), u.lang(), today()));
     }
 
-    // ---------- Статика ----------
+    // ---------- Корень ----------
 
-    private void handleStatic(HttpExchange ex) throws IOException {
-        String path = ex.getRequestURI().getPath();
-        if (!ex.getRequestMethod().equals("GET") && !ex.getRequestMethod().equals("HEAD")) {
-            send(ex, 405, "text/plain; charset=utf-8", "Method Not Allowed");
-            return;
-        }
-        if (path.equals("/")) path = "/index.html";
-        // Разрешаем только простые имена файлов, без выхода за пределы папки web.
-        if (!path.matches("^/[a-zA-Z0-9_-]+\\.[a-z]+$")) {
-            send(ex, 404, "text/plain; charset=utf-8", "Not found");
-            return;
-        }
-        String ext = path.substring(path.lastIndexOf('.') + 1);
-        try (InputStream in = Server.class.getResourceAsStream("/web" + path)) {
-            if (in == null || !MIME.containsKey(ext)) {
-                send(ex, 404, "text/plain; charset=utf-8", "Not found");
-                return;
-            }
-            byte[] bytes = in.readAllBytes();
-            ex.getResponseHeaders().set("Content-Type", MIME.get(ext));
-            ex.getResponseHeaders().set("Cache-Control", "no-cache");
-            ex.getResponseHeaders().set("X-Content-Type-Options", "nosniff");
-            ex.getResponseHeaders().set("X-Frame-Options", "DENY");
-            ex.sendResponseHeaders(200, ex.getRequestMethod().equals("HEAD") ? -1 : bytes.length);
-            if (!ex.getRequestMethod().equals("HEAD")) {
-                try (OutputStream out = ex.getResponseBody()) {
-                    out.write(bytes);
-                }
-            }
-            ex.close();
+    /** Фронтенда здесь нет: корень отвечает, что это API, остальное — 404. */
+    private void handleRoot(HttpExchange ex) throws IOException {
+        ex.getResponseHeaders().set("X-Content-Type-Options", "nosniff");
+        if (ex.getRequestURI().getPath().equals("/") && ex.getRequestMethod().equals("GET")) {
+            send(ex, 200, "application/json; charset=utf-8", Json.write(Map.of("service", "pulsar-tax-api", "status", "ok")));
+        } else {
+            sendError(ex, 404, "Not found");
         }
     }
 

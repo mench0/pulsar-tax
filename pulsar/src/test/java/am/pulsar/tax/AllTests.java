@@ -1,6 +1,7 @@
 package am.pulsar.tax;
 
 import am.pulsar.tax.Model.*;
+import am.pulsar.tax.Server.Options;
 import am.pulsar.tax.TaxRules.ThresholdStatus;
 
 import java.math.BigDecimal;
@@ -53,6 +54,8 @@ public final class AllTests {
         run("API: ошибки проверки", AllTests::apiValidation);
         run("API: защита от чужих сайтов", AllTests::apiRequestSource);
         run("API: правила, импорт, экспорт, календарь", AllTests::apiMisc);
+        run("API: CORS для отдельного фронтенда", AllTests::apiCors);
+        run("Настройки cookie", AllTests::cookieOptions);
         System.out.println();
         System.out.println("Пройдено: " + passed + ", упало: " + failed);
         if (failed > 0) System.exit(1);
@@ -490,8 +493,13 @@ public final class AllTests {
         }
 
         static Env start() throws Exception {
-            Server server = new Server(new Accounts(null, null), null, Server.Options.DEFAULT, "127.0.0.1", 0);
+            Server server = new Server(new Accounts(null, null), null, Options.DEFAULT, "127.0.0.1", 0);
             server.start();
+            return new Env(server, true);
+        }
+
+        /** Клиент для уже запущенного сервера; close() его останавливает. */
+        static Env on(Server server) {
             return new Env(server, true);
         }
 
@@ -540,7 +548,6 @@ public final class AllTests {
             eq(401, env.call("GET", "/api/profile", null).statusCode());
             eq(401, env.call("GET", "/api/auth/me", null).statusCode());
             eq(200, env.call("GET", "/api/rules", null).statusCode()); // справочник открыт
-            eq(200, env.call("GET", "/", null).statusCode());
             env.register("me@example.am");
             eq(200, env.call("GET", "/api/profile", null).statusCode());
             eq(204, env.call("POST", "/api/auth/logout", null).statusCode());
@@ -585,10 +592,8 @@ public final class AllTests {
             eq(204, env.call("DELETE", "/api/payments/" + pay.get("id"), null).statusCode());
             eq(d("100000"), env.json("GET", "/api/summary?year=" + year, null).get("totalDue"));
 
-            HttpResponse<String> page = env.call("GET", "/", null);
-            eq(200, page.statusCode());
-            eq(true, page.body().contains("Pulsar"));
-            eq(404, env.call("GET", "/../secret.txt", null).statusCode());
+            eq(true, env.call("GET", "/", null).body().contains("pulsar-tax-api"));
+            eq(404, env.call("GET", "/index.html", null).statusCode()); // фронтенд в отдельном репозитории
         }
     }
 
@@ -691,5 +696,64 @@ public final class AllTests {
 
             eq("en", env.json("PUT", "/api/account", "{\"lang\":\"en\"}").get("lang"));
         }
+    }
+
+    static void apiCors() throws Exception {
+        Options opts = new Options(false, true, "Strict", java.util.Set.of("https://app.pulsar.am"));
+        Server server = new Server(new Accounts(null, null), null, opts, "127.0.0.1", 0);
+        server.start();
+        try (Env env = Env.on(server)) {
+            // Предварительный запрос с разрешённого адреса.
+            HttpResponse<String> pre = env.call("OPTIONS", "/api/incomes", null, "Origin", "https://app.pulsar.am",
+                    "Access-Control-Request-Method", "POST", "Access-Control-Request-Headers", "content-type");
+            eq(204, pre.statusCode());
+            eq("https://app.pulsar.am", pre.headers().firstValue("Access-Control-Allow-Origin").orElse(""));
+            eq("true", pre.headers().firstValue("Access-Control-Allow-Credentials").orElse(""));
+            eq(true, pre.headers().firstValue("Access-Control-Allow-Methods").orElse("").contains("DELETE"));
+            // Чужой адрес не получает разрешения.
+            eq(403, env.call("OPTIONS", "/api/incomes", null, "Origin", "https://evil.example").statusCode());
+            HttpResponse<String> get = env.call("GET", "/api/rules", null, "Origin", "https://evil.example");
+            eq(200, get.statusCode());
+            eq(true, get.headers().firstValue("Access-Control-Allow-Origin").isEmpty());
+            // Фронтенд при разработке на другом локальном порту.
+            eq("http://localhost:5500", env.call("GET", "/api/rules", null, "Origin", "http://localhost:5500")
+                    .headers().firstValue("Access-Control-Allow-Origin").orElse(""));
+            // Регистрация с разрешённого адреса проходит, с чужого — нет.
+            String reg = "{\"email\":\"c@example.am\",\"password\":\"пароль-для-теста\"}";
+            eq(403, env.call("POST", "/api/auth/register", reg, "Content-Type", "application/json",
+                    "Origin", "https://evil.example").statusCode());
+            HttpResponse<String> ok = env.call("POST", "/api/auth/register", reg, "Content-Type", "application/json",
+                    "Origin", "https://app.pulsar.am");
+            eq(201, ok.statusCode());
+            eq("https://app.pulsar.am", ok.headers().firstValue("Access-Control-Allow-Origin").orElse(""));
+        }
+
+        // На сетевом адресе локальные адреса без списка не разрешены.
+        Server open = new Server(new Accounts(null, null), null, Options.DEFAULT, "0.0.0.0", 0);
+        eq(false, open.originAllowed("http://localhost:5500", "api.pulsar.am"));
+        eq(true, open.originAllowed("https://api.pulsar.am", "api.pulsar.am"));
+    }
+
+    static void cookieOptions() throws Exception {
+        expectIllegal(() -> new Options(false, true, "None", java.util.Set.of())); // None без Secure браузер отвергнет
+        expectIllegal(() -> new Options(true, true, "Whatever", java.util.Set.of()));
+        Options cross = new Options(true, true, "None", java.util.Set.of("https://pulsar-tax-web.vercel.app"));
+        Server server = new Server(new Accounts(null, null), null, cross, "127.0.0.1", 0);
+        server.start();
+        try (Env env = Env.on(server)) {
+            HttpResponse<String> r = env.call("POST", "/api/auth/register",
+                    "{\"email\":\"x@example.am\",\"password\":\"пароль-для-теста\"}");
+            String cookie = r.headers().firstValue("Set-Cookie").orElse("");
+            eq(true, cookie.contains("SameSite=None") && cookie.contains("Secure") && cookie.contains("HttpOnly"));
+        }
+    }
+
+    private static void expectIllegal(Runnable r) {
+        try {
+            r.run();
+        } catch (IllegalArgumentException expected) {
+            return;
+        }
+        throw new AssertionError("ожидалась IllegalArgumentException");
     }
 }

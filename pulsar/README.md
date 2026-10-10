@@ -1,6 +1,9 @@
-# Pulsar Tax
+# Pulsar Tax — API
 
 Помощник ИП в Армении: доходы, налог, сроки, отчёт и счета в одном месте.
+
+В этом репозитории только бэкенд (REST API). Веб-интерфейс — в отдельном репозитории
+[mench0/pulsar-tax-web](https://github.com/mench0/pulsar-tax-web).
 
 Первый продукт экосистемы **Pulsar**. MVP для проверки спроса.
 
@@ -36,14 +39,14 @@
 java -jar build/pulsar-tax.jar
 ```
 
-Откройте http://127.0.0.1:8080 и зарегистрируйтесь.
+API отвечает на http://127.0.0.1:8080. Интерфейс запускается из репозитория pulsar-tax-web
+(см. его README): пока API слушает только 127.0.0.1, он принимает запросы фронтенда с любого локального порта.
 
 ### Windows (PowerShell)
 
 ```powershell
 mkdir build\classes -Force
 javac --release 21 -encoding UTF-8 -d build\classes (Get-ChildItem -Recurse src\main\java -Filter *.java).FullName
-Copy-Item -Recurse -Force src\main\resources\* build\classes\
 jar --create --file build\pulsar-tax.jar --main-class am.pulsar.tax.Main -C build\classes .
 java -jar build\pulsar-tax.jar
 ```
@@ -58,6 +61,8 @@ java -jar build\pulsar-tax.jar
 | `PULSAR_SIGNUP` | `open` | `closed` — регистрация закрыта, войти могут только существующие пользователи (первого можно создать всегда) |
 | `PULSAR_SECURE_COOKIE` | `0` | `1`, если сервер работает за HTTPS: cookie сессии получит флаг `Secure` |
 | `PULSAR_TELEGRAM_TOKEN` | — | Токен бота от @BotFather. Без него напоминания в Telegram выключены |
+| `PULSAR_ALLOWED_ORIGINS` | — | Адреса фронтенда через запятую, например `https://app.pulsar.am`. Им разрешены запросы с cookie (CORS) |
+| `PULSAR_COOKIE_SAMESITE` | `Strict` | `Strict` — фронтенд на том же сайте (поддомен); `None` — на другом домене, требует `PULSAR_SECURE_COOKIE=1` |
 
 Сроки и «сегодня» считаются по времени Еревана, где бы ни стоял сервер.
 
@@ -70,8 +75,9 @@ java -jar build\pulsar-tax.jar
 ### Работа в сети
 
 Для доступа не с этого компьютера запустите с `PULSAR_HOST=0.0.0.0` за обратным прокси с HTTPS
-(Caddy, nginx) и `PULSAR_SECURE_COOKIE=1`. Бот Telegram работает через long polling,
-публичный адрес для него не нужен.
+(Caddy, nginx), `PULSAR_SECURE_COOKIE=1` и адресом фронтенда в `PULSAR_ALLOWED_ORIGINS`.
+Схемы размещения фронтенда описаны в README pulsar-tax-web. Бот Telegram работает
+через long polling, публичный адрес для него не нужен.
 
 ## Данные
 
@@ -89,7 +95,7 @@ data/
 ```
 src/main/java/am/pulsar/tax/
   Main.java        точка входа, ежечасные задачи: резервная копия и напоминания
-  Server.java      HTTP-сервер (JDK HttpServer): REST API, календарь и статика
+  Server.java      HTTP-сервер (JDK HttpServer): REST API, календарь, CORS
   Accounts.java    учётные записи, пароли, сессии, привязка Telegram
   Store.java       данные одного ИП в JSON-файле с атомарной записью
   TaxRules.java    налоговые правила по годам: пороги, ставки, запреты по видам деятельности
@@ -102,15 +108,13 @@ src/main/java/am/pulsar/tax/
   Fields.java      чтение полей с понятными ошибками и ограничением размера чисел
   Json.java        минимальный JSON без зависимостей
   Model.java       модель: профиль, доход, счёт, уплата
-src/main/resources/web/
-  index.html, styles.css, app.js   фронтенд без сборки
-  i18n.js                          тексты на армянском, русском и английском
 src/test/java/am/pulsar/tax/AllTests.java   тесты (без JUnit)
 ```
 
 ### API
 
 Все запросы, кроме входа, регистрации и `/api/rules`, требуют cookie сессии.
+Фронтенд с другого адреса отправляет их с `credentials: 'include'`.
 
 | Метод | Путь | Описание |
 |---|---|---|
@@ -135,7 +139,7 @@ src/test/java/am/pulsar/tax/AllTests.java   тесты (без JUnit)
 | GET | `/cal/{token}.ics` | Календарь сроков по личной ссылке |
 
 Ошибки возвращаются как `{"error": "текст"}` (пока только на русском). Тела запросов — только
-`Content-Type: application/json`. Изменяющие запросы с чужим `Origin` и (при запуске на 127.0.0.1)
+`Content-Type: application/json`. Изменяющие запросы с адреса не из `PULSAR_ALLOWED_ORIGINS` и (при запуске на 127.0.0.1)
 запросы с чужим `Host` отклоняются с кодом 403. После 5 неверных паролей вход по этой почте
 блокируется на 15 минут.
 
@@ -152,7 +156,7 @@ src/test/java/am/pulsar/tax/AllTests.java   тесты (без JUnit)
 срок годового отчёта микробизнеса, шаги подачи в file-online и требования к электронным счетам.
 Общая система (НДС) в MVP не рассчитывается.
 
-Армянский перевод интерфейса сделан без носителя языка — его нужно вычитать.
+Тексты напоминаний и календаря на армянском (`Deadlines.java`) сделаны без носителя языка — их нужно вычитать.
 
 ## Что дальше
 

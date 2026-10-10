@@ -4,6 +4,8 @@ import java.nio.file.Path;
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
+import java.util.LinkedHashSet;
+import java.util.Set;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -18,6 +20,8 @@ import java.util.concurrent.TimeUnit;
  *   PULSAR_SIGNUP         — open (по умолчанию) или closed: после первого пользователя регистрация закрыта
  *   PULSAR_SECURE_COOKIE  — 1, если сервер работает за HTTPS
  *   PULSAR_TELEGRAM_TOKEN — токен бота от @BotFather; без него напоминания в Telegram выключены
+ *   PULSAR_ALLOWED_ORIGINS — адреса фронтенда через запятую, например https://app.pulsar.am
+ *   PULSAR_COOKIE_SAMESITE — Strict (по умолчанию), Lax или None (фронтенд на другом домене, нужен HTTPS)
  */
 public final class Main {
 
@@ -32,7 +36,9 @@ public final class Main {
         Path dir = Path.of(env("PULSAR_DATA_DIR", "data"));
         Server.Options options = new Server.Options(
                 env("PULSAR_SECURE_COOKIE", "0").equals("1"),
-                !env("PULSAR_SIGNUP", "open").equals("closed"));
+                !env("PULSAR_SIGNUP", "open").equals("closed"),
+                env("PULSAR_COOKIE_SAMESITE", "Strict"),
+                origins(env("PULSAR_ALLOWED_ORIGINS", "")));
 
         // Файл данных версии без учётных записей переходит к первому зарегистрированному.
         Accounts accounts = new Accounts(dir, dir.resolve("pulsar.json"));
@@ -47,8 +53,10 @@ public final class Main {
         timer.scheduleAtFixedRate(() -> hourly(dir, telegram), 1, 60, TimeUnit.MINUTES);
 
         // Вывод латиницей, чтобы консоль с любой кодировкой показала его без искажений.
-        System.out.println("Pulsar Tax: http://" + (host.equals("0.0.0.0") ? "localhost" : host)
+        System.out.println("Pulsar Tax API: http://" + (host.equals("0.0.0.0") ? "localhost" : host)
                 + ":" + server.port());
+        System.out.println("Allowed origins: " + (options.allowedOrigins().isEmpty()
+                ? "local addresses only" : String.join(", ", options.allowedOrigins())));
         System.out.println("Data dir: " + dir.toAbsolutePath());
         System.out.println("Telegram reminders: " + (telegram == null ? "off" : "on"));
     }
@@ -63,6 +71,16 @@ public final class Main {
             System.err.println("Backup failed: " + e.getMessage());
         }
         if (telegram != null && now.getHour() >= REMIND_HOUR) telegram.sendReminders(today);
+    }
+
+    private static Set<String> origins(String list) {
+        Set<String> set = new LinkedHashSet<>();
+        for (String o : list.split(",")) {
+            String t = o.trim();
+            while (t.endsWith("/")) t = t.substring(0, t.length() - 1);
+            if (!t.isEmpty()) set.add(t);
+        }
+        return set;
     }
 
     private static String env(String key, String def) {

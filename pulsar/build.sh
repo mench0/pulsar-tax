@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Сборка Pulsar Tax без внешних зависимостей. Нужна только JDK 21+.
+# Сборка API Pulsar Tax без внешних зависимостей. Нужна только JDK 21+.
 #   ./build.sh        — собрать build/pulsar-tax.jar
 #   ./build.sh test   — собрать и запустить тесты
 set -euo pipefail
@@ -9,7 +9,6 @@ rm -rf build
 mkdir -p build/classes build/test
 
 javac --release 21 -encoding UTF-8 -d build/classes $(find src/main/java -name '*.java')
-cp -r src/main/resources/. build/classes/
 
 if [[ "${1:-}" == "test" ]]; then
   javac --release 21 -encoding UTF-8 -cp build/classes -d build/test $(find src/test/java -name '*.java')
