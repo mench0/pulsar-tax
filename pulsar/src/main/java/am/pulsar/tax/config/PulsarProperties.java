@@ -2,7 +2,6 @@ package am.pulsar.tax.config;
 
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
-import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.LinkedHashSet;
 import java.util.Set;
@@ -10,7 +9,6 @@ import java.util.Set;
 /**
  * Настройки Pulsar Tax (application.yml, переменные окружения PULSAR_*).
  *
- * @param dataDir        папка данных: встроенная база при разработке
  * @param signup         open — регистрация открыта, closed — только первый пользователь
  * @param secureCookie   cookie сессии только по HTTPS
  * @param cookieSameSite Strict — фронтенд на том же сайте, None — на другом домене (нужен HTTPS)
@@ -22,7 +20,6 @@ import java.util.Set;
  */
 @ConfigurationProperties("pulsar")
 public record PulsarProperties(
-        Path dataDir,
         String signup,
         boolean secureCookie,
         String cookieSameSite,
@@ -33,7 +30,6 @@ public record PulsarProperties(
         String importLegacy) {
 
     public PulsarProperties {
-        if (dataDir == null) dataDir = Path.of("data");
         if (signup == null || signup.isBlank()) signup = "open";
         if (cookieSameSite == null || cookieSameSite.isBlank()) cookieSameSite = "Strict";
         if (!Set.of("Strict", "Lax", "None").contains(cookieSameSite)) {

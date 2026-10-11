@@ -10,7 +10,6 @@ import org.springframework.test.context.DynamicPropertySource;
 import tools.jackson.databind.JsonNode;
 
 import java.net.http.HttpResponse;
-import java.nio.file.Files;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.List;
@@ -21,29 +20,18 @@ import java.util.concurrent.Future;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-/** API целиком: настоящий сервер, встроенный PostgreSQL, заглушки ЦБ РА и Telegram. */
-@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+/** API целиком: настоящий сервер, временный PostgreSQL (TestDatabaseConfig), заглушки ЦБ РА и Telegram. */
+@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT, classes = {PulsarApplication.class, TestDatabaseConfig.class})
 class ApiTest {
 
     @DynamicPropertySource
     static void props(DynamicPropertyRegistry r) throws Exception {
-        r.add("pulsar.data-dir", () -> tempDir());
         r.add("pulsar.cba-url", Stubs::cbaUrl);
         r.add("pulsar.telegram-token", () -> "TOKEN");
         r.add("pulsar.telegram-api", Stubs::telegramUrl);
         r.add("pulsar.allowed-origins", () -> "https://app.pulsar.am/");
     }
 
-    private static String dir;
-
-    private static synchronized String tempDir() {
-        try {
-            if (dir == null) dir = Files.createTempDirectory("pulsar-api-test").toString();
-            return dir;
-        } catch (Exception e) {
-            throw new IllegalStateException(e);
-        }
-    }
 
     @LocalServerPort
     int port;

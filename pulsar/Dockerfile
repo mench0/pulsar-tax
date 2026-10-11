@@ -12,6 +12,6 @@ RUN useradd --system --create-home pulsar
 USER pulsar
 WORKDIR /home/pulsar
 COPY --from=build /src/target/pulsar-tax.jar app.jar
-ENV PULSAR_HOST=0.0.0.0 PULSAR_PORT=8080 PULSAR_DATA_DIR=/home/pulsar/data
+ENV PULSAR_HOST=0.0.0.0 PULSAR_PORT=8080
 EXPOSE 8080
 ENTRYPOINT ["java", "-jar", "app.jar"]

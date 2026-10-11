@@ -44,21 +44,25 @@ Java 21, Spring Boot 4 (Web MVC, Security, Data JPA), Hibernate, PostgreSQL, м�
 
 ## Запуск для разработки
 
-Нужна только **Java 21+**: Maven скачается сам (`mvnw`), PostgreSQL тоже. Если адрес базы
-(`PULSAR_DB_URL`) не задан, приложение поднимает встроенный PostgreSQL в `PULSAR_DATA_DIR/pg`.
+Нужны **Java 21+** и **PostgreSQL 14+** (Maven скачается сам через `mvnw`). Проще всего поднять базу в Docker:
 
 ```bash
 cd pulsar
+docker compose up -d db       # PostgreSQL на localhost:5432, база и пользователь pulsar, пароль pulsar
 ./mvnw verify                 # тесты и сборка target/pulsar-tax.jar
 java -jar target/pulsar-tax.jar
 ```
+
+Без Docker установите PostgreSQL и создайте базу:
+`createuser -P pulsar` (пароль `pulsar`) и `createdb -O pulsar pulsar`. Другая база —
+через `PULSAR_DB_URL`, `PULSAR_DB_USER`, `PULSAR_DB_PASSWORD`.
 
 В Windows — `mvnw.cmd verify`. API отвечает на http://127.0.0.1:8080. Интерфейс запускается из репозитория
 pulsar-tax-web (см. его README): пока API слушает только 127.0.0.1, он принимает запросы фронтенда с любого
 локального порта.
 
-Встроенный PostgreSQL не запускается от root (так устроен сам PostgreSQL) — запускайте приложение и тесты
-от обычного пользователя.
+Тестам бэкенда своя база не нужна: они поднимают временный PostgreSQL на время прогона (только в тестах,
+в jar его нет). Временный PostgreSQL не запускается от root — запускайте тесты от обычного пользователя.
 
 ## Выкладка на сервер
 
@@ -72,7 +76,7 @@ PULSAR_HOST=0.0.0.0 PULSAR_SECURE_COOKIE=1 PULSAR_ALLOWED_ORIGINS=https://app.pu
 java -jar pulsar-tax.jar
 ```
 
-Или в Docker вместе с базой: `docker compose up -d` (см. `docker-compose.yml`, смените пароль).
+Или в Docker вместе с базой: `PULSAR_DB_PASSWORD=свой-пароль docker compose up -d` (см. `docker-compose.yml`).
 Проверка работоспособности для балансировщика: `GET /actuator/health`.
 
 Резервная копия: `pg_dump -Fc pulsar > pulsar-$(date +%F).dump`, восстановление — `pg_restore -d pulsar файл`.
@@ -83,9 +87,8 @@ java -jar pulsar-tax.jar
 |---|---|---|
 | `PULSAR_PORT` | `8080` | Порт |
 | `PULSAR_HOST` | `127.0.0.1` | Адрес. `0.0.0.0` откроет доступ из сети |
-| `PULSAR_DB_URL` | — | Адрес базы, например `jdbc:postgresql://localhost:5432/pulsar`. Пусто — встроенный PostgreSQL |
-| `PULSAR_DB_USER`, `PULSAR_DB_PASSWORD` | — | Пользователь и пароль базы |
-| `PULSAR_DATA_DIR` | `data` | Папка встроенной базы (только без `PULSAR_DB_URL`) |
+| `PULSAR_DB_URL` | `jdbc:postgresql://localhost:5432/pulsar` | Адрес базы PostgreSQL |
+| `PULSAR_DB_USER`, `PULSAR_DB_PASSWORD` | `pulsar`, `pulsar` | Пользователь и пароль базы. На сервере задайте свой пароль |
 | `PULSAR_SIGNUP` | `open` | `closed` — регистрация закрыта, войти могут только существующие пользователи (первого можно создать всегда) |
 | `PULSAR_SECURE_COOKIE` | `0` | `1`, если сервер работает за HTTPS: cookie сессии получит флаг `Secure` |
 | `PULSAR_TELEGRAM_TOKEN` | — | Токен бота от @BotFather. Без него напоминания в Telegram выключены |
@@ -130,7 +133,7 @@ src/main/java/am/pulsar/tax/
                 (Deadlines), CSV
   client/       внешние API: курсы ЦБ РА с кэшем в базе, бот Telegram
   security/     Spring Security, сессии (cookie и Bearer), пароли, CORS и защита от чужих сайтов
-  config/       настройки PULSAR_*, Jackson, фильтры, встроенный PostgreSQL
+  config/       настройки PULSAR_*, Jackson, фильтры
   job/          рассылка напоминаний по расписанию, перенос данных старой версии при запуске
   exception/    ApiException и ответы {"error": ...}
   util/         разбор и проверка полей запроса, время Еревана
