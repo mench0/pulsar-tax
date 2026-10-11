@@ -55,6 +55,11 @@ pulsar:
   cba-url: ${PULSAR_CBA_URL:https://api.cba.am/exchangerates.asmx}
   # Путь к папке данных старой версии (users.json и users/*.json) — перенос в базу при запуске.
   import-legacy: ${PULSAR_IMPORT_LEGACY:}
+  session:
+    # Время жизни сессии после входа.
+    ttl: ${PULSAR_SESSION_TTL:1h}
+    # Хранилище сессий: caffeine — в памяти процесса; redis — когда появится реализация RedisSessionStore.
+    store: ${PULSAR_SESSION_STORE:caffeine}
 
 logging:
   level:

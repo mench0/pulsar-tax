@@ -13,7 +13,7 @@
 ## Что умеет
 
 - **Учётные записи.** Регистрация по почте и паролю, у каждого ИП свои данные.
-  Вход хранится 30 дней, смена пароля выходит со всех устройств.
+  Сессия живёт 1 час после входа (`PULSAR_SESSION_TTL`), смена пароля выходит со всех устройств.
 - **Загрузка банковской выписки (CSV).** Колонки и формат даты определяются сами, их можно поправить.
   Поступления отмечаются как доход, списания пропускаются, переводы между своими счетами
   и возвраты помечаются для проверки. Повторная загрузка той же выписки не создаёт дублей.
@@ -101,6 +101,8 @@ docker run -d --name pulsar-api --network host \
 | `PULSAR_DB_URL` | `jdbc:postgresql://localhost:5432/pulsar` | Адрес базы PostgreSQL |
 | `PULSAR_DB_USER`, `PULSAR_DB_PASSWORD` | `pulsar`, `pulsar` | Пользователь и пароль базы. На сервере задайте свой пароль |
 | `PULSAR_SIGNUP` | `open` | `closed` — регистрация закрыта, войти могут только существующие пользователи (первого можно создать всегда) |
+| `PULSAR_SESSION_TTL` | `1h` | Время жизни сессии после входа: `30m`, `8h`, `30d` |
+| `PULSAR_SESSION_STORE` | `caffeine` | Хранилище сессий (см. «Сессии») |
 | `PULSAR_SECURE_COOKIE` | `0` | `1`, если сервер работает за HTTPS: cookie сессии получит флаг `Secure` |
 | `PULSAR_TELEGRAM_TOKEN` | — | Токен бота от @BotFather. Без него напоминания в Telegram выключены |
 | `PULSAR_ALLOWED_ORIGINS` | — | Адреса фронтенда через запятую, например `https://app.pulsar.am`. Им разрешены запросы с cookie (CORS) |
@@ -137,11 +139,25 @@ docker run -d --name pulsar-api --network host \
 
 ## Данные
 
-Таблицы (`V1__init.sql`): `users`, `sessions` (только SHA-256 токена), `businesses` (профиль ИП),
+Таблицы (`V1__init.sql`): `users`, `businesses` (профиль ИП),
 `incomes`, `expenses`, `invoices` и `invoice_items`, `tax_payments`, `import_profiles`, `fx_rates` (кэш курсов ЦБ).
 Пароли — PBKDF2-SHA256 с солью. Деньги — `numeric`, без потерь на округлении.
 Схему меняет только Flyway: новая миграция — новый файл `V3__что_меняется.sql`; Hibernate лишь проверяет,
 что сущности совпадают со схемой. У сущностей с `BaseEntity` есть `created_at` и `last_updated_at` (V2).
+
+### Сессии
+
+Сессии хранятся не в базе, а в `SessionStore`: SHA-256 токена → id пользователя, со временем жизни
+`PULSAR_SESSION_TTL` (по умолчанию 1 час). Сейчас реализация одна — `CaffeineSessionStore`, в памяти процесса:
+после перезапуска API нужно войти заново, и она подходит, пока API запущен в одном экземпляре.
+
+Переход на Redis (несколько экземпляров API, сессии переживают перезапуск):
+1. Добавить `spring-boot-starter-data-redis` и настройки `spring.data.redis.*`.
+2. Написать `RedisSessionStore implements SessionStore` с
+   `@ConditionalOnProperty(prefix = "pulsar.session", name = "store", havingValue = "redis")`:
+   `save` — `SET session:{hash} {userId} EX {ttl}` и `SADD user-sessions:{userId} {hash}`;
+   `findUserId` — `GET`; `delete` — `DEL`; `deleteAllForUser` — удалить все ключи из `user-sessions:{userId}`.
+3. Запустить с `PULSAR_SESSION_STORE=redis`. Остальной код (вход, фильтр сессий, cookie) не меняется.
 
 ## Устройство
 
@@ -167,6 +183,7 @@ app/src/main/java/am/pulsar/tax/app/
   config/            PulsarProperties, Jackson (числа и даты из полей ввода), веб; config/security — сессии, CORS
   migration/         Java-миграции Flyway (R__FirstUser) и перенос данных старой версии
   exception/         ApiException и наследники, ControllerExceptionHandler
+  service/session/   SessionStore — хранилище сессий (CaffeineSessionStore; позже Redis)
   utils/             время Еревана, пароли, CSV, текущий пользователь
 app/src/main/resources/
   application.yml    настройки

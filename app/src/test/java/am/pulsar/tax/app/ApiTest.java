@@ -102,7 +102,7 @@ class ApiTest {
                 "{\"email\":\"cookie@example.am\",\"password\":\"пароль-для-теста\",\"lang\":\"hy\"}");
         String cookie = r.headers().firstValue("Set-Cookie").orElseThrow();
         assertTrue(cookie.startsWith("pulsar_session="));
-        assertTrue(cookie.contains("HttpOnly") && cookie.contains("SameSite=Strict") && cookie.contains("Max-Age=2592000"));
+        assertTrue(cookie.contains("HttpOnly") && cookie.contains("SameSite=Strict") && cookie.contains("Max-Age=3600"));
         assertFalse(cookie.contains("Secure"));
         JsonNode me = ApiClient.JSON.readTree(r.body());
         assertEquals("hy", me.path("lang").asString());
