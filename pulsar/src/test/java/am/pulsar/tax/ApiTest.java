@@ -30,6 +30,8 @@ class ApiTest {
         r.add("pulsar.telegram-token", () -> "TOKEN");
         r.add("pulsar.telegram-api", Stubs::telegramUrl);
         r.add("pulsar.allowed-origins", () -> "https://app.pulsar.am/");
+        r.add("spring.flyway.placeholders.first_user_email", () -> " Admin@Example.am ");
+        r.add("spring.flyway.placeholders.first_user_password", () -> "пароль-админа");
     }
 
 
@@ -78,6 +80,14 @@ class ApiTest {
         try (ExecutorService pool = Executors.newFixedThreadPool(12)) {
             for (Future<Integer> f : pool.invokeAll(calls)) assertEquals(200, f.get());
         }
+    }
+
+    @Test
+    void firstUserFromMigration() throws Exception {
+        ApiClient c = client();
+        assertEquals(200, c.status("POST", "/api/auth/login", "{\"email\":\"admin@example.am\",\"password\":\"пароль-админа\"}"));
+        assertEquals("admin@example.am", c.json("GET", "/api/auth/me", null).path("email").asString());
+        assertEquals("MICRO", c.json("GET", "/api/profile", null).path("regime").asString());
     }
 
     @Test
