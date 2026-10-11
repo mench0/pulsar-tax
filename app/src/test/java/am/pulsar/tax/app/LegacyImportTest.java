@@ -13,7 +13,12 @@ import java.time.Instant;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /** Перенос папки данных версии на файлах: пароль, сессия и данные ИП переживают переход на PostgreSQL. */
-@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT, classes = {PulsarApplication.class, TestDatabaseConfig.class})
+@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT, classes = {PulsarApplication.class, TestDatabaseConfig.class},
+        properties = {
+        // Переменные PULSAR_* на машине разработчика не должны менять поведение тестов.
+        "spring.flyway.placeholders.first_user_email=", "spring.flyway.placeholders.first_user_password=",
+        "pulsar.signup=open", "pulsar.secure-cookie=false", "pulsar.cookie-same-site=Strict",
+        "pulsar.session.ttl=1h", "pulsar.session.store=caffeine"})
 class LegacyImportTest {
 
     static final String SESSION = "ab".repeat(32);
