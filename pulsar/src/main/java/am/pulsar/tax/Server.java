@@ -1,5 +1,6 @@
 package am.pulsar.tax;
 
+import am.pulsar.tax.Model.Expense;
 import am.pulsar.tax.Model.Income;
 import am.pulsar.tax.Model.Invoice;
 import am.pulsar.tax.Model.TaxPayment;
@@ -33,9 +34,15 @@ public final class Server {
      * @param sameSite       атрибут SameSite у cookie: Strict, если фронтенд на том же сайте
      *                       (app.example.am и api.example.am), None — если на другом домене
      * @param allowedOrigins адреса фронтенда, которым разрешены запросы с cookie (CORS)
+     * @param ratesUrl       адрес API курсов ЦБ РА (в тестах — заглушка)
      */
-    public record Options(boolean secureCookie, boolean signupOpen, String sameSite, Set<String> allowedOrigins) {
+    public record Options(boolean secureCookie, boolean signupOpen, String sameSite, Set<String> allowedOrigins,
+                          String ratesUrl) {
         public static final Options DEFAULT = new Options(false, true, "Strict", Set.of());
+
+        public Options(boolean secureCookie, boolean signupOpen, String sameSite, Set<String> allowedOrigins) {
+            this(secureCookie, signupOpen, sameSite, allowedOrigins, Rates.DEFAULT_BASE);
+        }
 
         public Options {
             if (!Set.of("Strict", "Lax", "None").contains(sameSite)) {
@@ -60,7 +67,9 @@ public final class Server {
     private static final int MAX_IMPORT = 5000;
     private static final String COOKIE = "pulsar_session";
     private static final Pattern ID_PATH =
-            Pattern.compile("^/api/(incomes|invoices|payments)/(\\d+)(/paid|/einvoice)?$");
+            Pattern.compile("^/api/(incomes|invoices|payments|expenses)/(\\d+)(/paid|/einvoice)?$");
+    /** Отпечаток заголовка выписки, который приложение считает само. */
+    private static final Pattern PROFILE_PATH = Pattern.compile("^/api/import-profiles/([0-9a-z-]{4,64})$");
     private static final Pattern CAL_PATH = Pattern.compile("^/cal/([0-9a-f]{40})\\.ics$");
     /** Имена, по которым к серверу на 127.0.0.1 обращается сам браузер пользователя. */
     private static final Set<String> LOCAL_HOSTS = Set.of("127.0.0.1", "localhost", "[::1]");
@@ -68,6 +77,7 @@ public final class Server {
     private final Accounts accounts;
     private final Telegram telegram;
     private final Options options;
+    private final Rates rates;
     private final HttpServer http;
     /** Сервер слушает только этот компьютер — тогда проверяем заголовок Host против DNS rebinding. */
     private final boolean loopbackOnly;
@@ -76,6 +86,7 @@ public final class Server {
         this.accounts = accounts;
         this.telegram = telegram;
         this.options = options;
+        this.rates = new Rates(options.ratesUrl());
         InetSocketAddress address = new InetSocketAddress(host, port);
         this.loopbackOnly = address.getAddress() != null && address.getAddress().isLoopbackAddress();
         this.http = HttpServer.create(address, 0);
@@ -187,7 +198,8 @@ public final class Server {
             case "GET /api/summary": {
                 LocalDate today = today();
                 int year = year(q, today);
-                return Summary.build(store.profile(), store.incomes(year), store.payments(year), year, today);
+                return Summary.build(store.profile(), store.incomes(year), store.payments(year), store.expenses(year),
+                        year, today);
             }
             case "GET /api/incomes":
                 return store.incomes(year(q, today())).stream().map(Income::toJson).toList();
@@ -203,6 +215,23 @@ public final class Server {
                 return store.payments(year(q, today())).stream().map(TaxPayment::toJson).toList();
             case "POST /api/payments":
                 return new Reply(201, store.addPayment(Codec.taxPayment(body(ex))).toJson());
+            case "GET /api/expenses":
+                return store.expenses(year(q, today())).stream().map(Expense::toJson).toList();
+            case "POST /api/expenses":
+                return new Reply(201, store.addExpense(Codec.expense(body(ex))).toJson());
+            case "GET /api/import-profiles":
+                return store.importProfiles();
+            case "GET /api/rates": {
+                LocalDate today = today();
+                LocalDate date = q.containsKey("date") ? new Fields(Map.of("date", q.get("date"))).date("date", true) : today;
+                Map<String, Object> m = new LinkedHashMap<>();
+                m.put("date", date);
+                m.put("source", "cba.am");
+                m.put("rates", rates.on(date, today));
+                return m;
+            }
+            case "GET /api/export/expenses.csv":
+                return new Raw("text/csv; charset=utf-8", Csv.expenses(store.allExpenses()), "expenses.csv");
             case "GET /api/export/data.json":
                 return new Raw("application/json; charset=utf-8", Json.write(store.toJson()), "pulsar-tax.json");
             case "GET /api/export/incomes.csv":
@@ -213,6 +242,12 @@ public final class Server {
                 break;
         }
 
+        Matcher profile = PROFILE_PATH.matcher(path);
+        if (profile.matches() && method.equals("PUT")) {
+            store.saveImportProfile(profile.group(1), Codec.importProfile(body(ex)));
+            return null;
+        }
+
         Matcher m = ID_PATH.matcher(path);
         if (m.matches()) {
             long id = Long.parseLong(m.group(2));
@@ -221,6 +256,9 @@ public final class Server {
             switch (kind + action + " " + method) {
                 case "incomes DELETE":
                     store.deleteIncome(id);
+                    return null;
+                case "expenses DELETE":
+                    store.deleteExpense(id);
                     return null;
                 case "payments DELETE":
                     store.deletePayment(id);

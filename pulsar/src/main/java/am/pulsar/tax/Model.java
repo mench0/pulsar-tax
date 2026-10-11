@@ -142,6 +142,31 @@ public final class Model {
         }
     }
 
+    public enum ExpenseCategory { RENT, EQUIPMENT, SOFTWARE, SERVICES, TRANSPORT, BANK_FEES, TAXES_FEES, OTHER }
+
+    /**
+     * Расход ИП. Пока только учёт и сводка: на налог не влияет, потому что правила вычета расходов
+     * из налога с оборота нужно сначала сверить с Налоговым кодексом.
+     */
+    public static final class Expense {
+        public long id;
+        public LocalDate date;
+        /** Сумма в драмах. */
+        public BigDecimal amount;
+        public ExpenseCategory category = ExpenseCategory.OTHER;
+        public String description = "";
+
+        Map<String, Object> toJson() {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("id", id);
+            m.put("date", date);
+            m.put("amount", amount);
+            m.put("category", category);
+            m.put("description", description);
+            return m;
+        }
+    }
+
     /** Уплата налога за квартал (у микробизнеса — за год, quarter = 0). */
     public static final class TaxPayment {
         public long id;

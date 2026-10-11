@@ -57,6 +57,9 @@ public final class AllTests {
         run("API: CORS для отдельного фронтенда", AllTests::apiCors);
         run("Настройки cookie", AllTests::cookieOptions);
         run("API: вход по токену для мобильного приложения", AllTests::apiBearerToken);
+        run("Курсы ЦБ: разбор ответа", AllTests::ratesParse);
+        run("API: расходы, настройки импорта, курсы ЦБ", AllTests::apiExpensesProfilesRates);
+        run("Хранилище: расходы и настройки импорта сохраняются", AllTests::storeExpensesProfiles);
         System.out.println();
         System.out.println("Пройдено: " + passed + ", упало: " + failed);
         if (failed > 0) System.exit(1);
@@ -789,5 +792,120 @@ public final class AllTests {
             eq(204, app.call("POST", "/api/auth/logout", null, "Authorization", "Bearer " + token3).statusCode());
             eq(401, app.call("GET", "/api/profile", null, "Authorization", "Bearer " + token3).statusCode());
         }
+    }
+
+    /** Ответ ЦБ РА в том виде, как его отдаёт метод ExchangeRatesByDate (сокращённо). */
+    static final String CBA_RESPONSE = """
+            <?xml version="1.0" encoding="utf-8"?>
+            <soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"><soap:Body>
+            <ExchangeRatesByDateResponse xmlns="http://www.cba.am/"><ExchangeRatesByDateResult>
+            <CurrentDate>2026-10-09T00:00:00</CurrentDate><PreviousDate>2026-10-08T00:00:00</PreviousDate>
+            <Rates>
+              <ExchangeRate><ISO>USD</ISO><Amount>1</Amount><Rate>387.45</Rate><Difference>-0.3</Difference></ExchangeRate>
+              <ExchangeRate><ISO>EUR</ISO><Amount>1</Amount><Rate>451.2</Rate><Difference>0.1</Difference></ExchangeRate>
+              <ExchangeRate><ISO>JPY</ISO><Amount>10</Amount><Rate>26.1</Rate><Difference>0</Difference></ExchangeRate>
+            </Rates></ExchangeRatesByDateResult></ExchangeRatesByDateResponse></soap:Body></soap:Envelope>""";
+
+    static void ratesParse() {
+        Map<String, BigDecimal> r = Rates.parse(CBA_RESPONSE);
+        eq(d("387.45"), r.get("USD"));
+        eq(d("451.2"), r.get("EUR"));
+        eq(d("2.61"), r.get("JPY")); // курс за 10 иен делится на 10
+        expectStatus(503, () -> Rates.parse("<html>ошибка</html>"));
+    }
+
+    static void apiExpensesProfilesRates() throws Exception {
+        java.util.concurrent.atomic.AtomicInteger calls = new java.util.concurrent.atomic.AtomicInteger();
+        java.util.concurrent.atomic.AtomicReference<String> lastBody = new java.util.concurrent.atomic.AtomicReference<>();
+        com.sun.net.httpserver.HttpServer cba = com.sun.net.httpserver.HttpServer.create(
+                new java.net.InetSocketAddress("127.0.0.1", 0), 0);
+        cba.createContext("/", ex -> {
+            calls.incrementAndGet();
+            lastBody.set(new String(ex.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            byte[] b = CBA_RESPONSE.getBytes(StandardCharsets.UTF_8);
+            ex.sendResponseHeaders(200, b.length);
+            ex.getResponseBody().write(b);
+            ex.close();
+        });
+        cba.start();
+        Options opts = new Options(false, true, "Strict", java.util.Set.of(),
+                "http://127.0.0.1:" + cba.getAddress().getPort() + "/exchangerates.asmx");
+        Server server = new Server(new Accounts(null, null), null, opts, "127.0.0.1", 0);
+        server.start();
+        try (Env env = Env.on(server)) {
+            env.register("money@example.am");
+
+            // Расходы: учёт и сводка, на налог не влияют.
+            eq(201, env.call("POST", "/api/expenses",
+                    "{\"date\":\"2026-02-10\",\"amount\":\"12000\",\"category\":\"SOFTWARE\",\"description\":\"Figma\"}").statusCode());
+            eq(201, env.call("POST", "/api/expenses", "{\"date\":\"2026-05-01\",\"amount\":\"3000\"}").statusCode());
+            eq(400, env.call("POST", "/api/expenses", "{\"date\":\"2026-05-01\",\"amount\":\"-1\"}").statusCode());
+            eq(400, env.call("POST", "/api/expenses", "{\"date\":\"2026-05-01\",\"amount\":\"1\",\"category\":\"FOOD\"}").statusCode());
+            List<?> list = (List<?>) Json.parse(env.call("GET", "/api/expenses?year=2026", null).body());
+            eq(2, list.size());
+            eq("OTHER", ((Map<?, ?>) list.get(0)).get("category"));
+            env.json("PUT", "/api/profile", "{\"name\":\"Т\",\"regime\":\"TURNOVER\",\"activity\":\"SERVICES\"}");
+            env.call("POST", "/api/incomes", "{\"date\":\"2026-02-01\",\"amount\":\"100000\"}");
+            Map<String, Object> s = env.json("GET", "/api/summary?year=2026", null);
+            eq(d("15000"), s.get("totalExpenses"));
+            eq(d("10000"), s.get("totalTax")); // расходы не уменьшают налог
+            eq(d("10"), s.get("setAsidePercent"));
+            eq(d("12000"), ((Map<?, ?>) ((List<?>) s.get("quarters")).get(0)).get("expenses"));
+            eq(204, env.call("DELETE", "/api/expenses/" + ((Map<?, ?>) list.get(0)).get("id"), null).statusCode()); // новее — первым
+            eq(404, env.call("DELETE", "/api/expenses/999999", null).statusCode());
+            eq(true, env.call("GET", "/api/export/expenses.csv", null).body().contains("SOFTWARE;Figma"));
+
+            // Настройки импорта: сохраняются по отпечатку заголовка и проверяются.
+            String mapping = "{\"date\":0,\"amount\":1,\"debit\":2,\"desc\":4,\"currencyCol\":-1,"
+                    + "\"dateFormat\":\"dd.mm.yyyy\",\"currency\":\"AMD\"}";
+            eq(204, env.call("PUT", "/api/import-profiles/csv-1a2b3c4d", mapping).statusCode());
+            eq(400, env.call("PUT", "/api/import-profiles/csv-1a2b3c4d", mapping.replace("dd.mm.yyyy", "dd-mm")).statusCode());
+            eq(400, env.call("PUT", "/api/import-profiles/csv-1a2b3c4d", mapping.replace("\"date\":0", "\"date\":-5")).statusCode());
+            eq(404, env.call("PUT", "/api/import-profiles/BAD!", mapping).statusCode());
+            Map<String, Object> profiles = env.json("GET", "/api/import-profiles", null);
+            eq(d("4"), ((Map<?, ?>) profiles.get("csv-1a2b3c4d")).get("desc"));
+
+            // Курсы ЦБ: запрос на нужную дату, прошедшие даты кэшируются.
+            Map<String, Object> r = env.json("GET", "/api/rates?date=2026-10-09", null);
+            eq(d("387.45"), ((Map<?, ?>) r.get("rates")).get("USD"));
+            eq(true, lastBody.get().contains("<date>2026-10-09T00:00:00</date>"));
+            env.json("GET", "/api/rates?date=2026-10-09", null);
+            eq(1, calls.get());
+            eq(400, env.call("GET", "/api/rates?date=2999-01-01", null).statusCode());
+            eq(400, env.call("GET", "/api/rates?date=вчера", null).statusCode());
+        } finally {
+            cba.stop(0);
+        }
+
+        // ЦБ недоступен — понятная ошибка, а не 500.
+        Server offline = new Server(new Accounts(null, null), null,
+                new Options(false, true, "Strict", java.util.Set.of(), "http://127.0.0.1:1/none"), "127.0.0.1", 0);
+        offline.start();
+        try (Env env = Env.on(offline)) {
+            env.register("offline@example.am");
+            HttpResponse<String> res = env.call("GET", "/api/rates?date=2026-10-09", null);
+            eq(503, res.statusCode());
+            eq(true, res.body().contains("вручную"));
+            eq(401, env.anotherUser().call("GET", "/api/rates", null).statusCode()); // только после входа
+        }
+    }
+
+    static void storeExpensesProfiles() throws Exception {
+        Path file = Files.createTempDirectory("pulsar-exp").resolve("data.json");
+        Store s = new Store(file);
+        Expense e = Codec.expense(Map.of("date", "2026-03-01", "amount", "500", "category", "RENT"));
+        s.addExpense(e);
+        s.saveImportProfile("csv-aaaa", Codec.importProfile(Map.of("date", d("0"), "amount", d("1"), "debit", d("-1"),
+                "desc", d("2"), "currencyCol", d("-1"), "dateFormat", "yyyy-mm-dd", "currency", "USD")));
+        for (int i = 0; i < 25; i++) {
+            s.saveImportProfile("csv-p" + i, Codec.importProfile(Map.of("date", d("0"), "amount", d("1"), "debit", d("-1"),
+                    "desc", d("-1"), "currencyCol", d("-1"), "dateFormat", "dd.mm.yyyy", "currency", "AMD")));
+        }
+        Store reloaded = new Store(file);
+        eq(1, reloaded.expenses(2026).size());
+        eq(ExpenseCategory.RENT, reloaded.expenses(2026).get(0).category);
+        eq(20, reloaded.importProfiles().size()); // старые настройки вытесняются
+        eq(false, reloaded.importProfiles().containsKey("csv-aaaa"));
+        eq(true, reloaded.addIncome(income("2026-03-02", "1", null)).id > e.id);
     }
 }

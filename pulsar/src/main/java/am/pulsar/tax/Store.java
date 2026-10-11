@@ -24,6 +24,9 @@ public final class Store {
     private final List<Income> incomes = new ArrayList<>();
     private final List<Invoice> invoices = new ArrayList<>();
     private final List<TaxPayment> payments = new ArrayList<>();
+    private final List<Expense> expenses = new ArrayList<>();
+    /** Сопоставление колонок выписки по отпечатку заголовка: следующая выписка того же банка разберётся сама. */
+    private final Map<String, Map<String, Object>> importProfiles = new LinkedHashMap<>();
     private long nextId = 1;
 
     /** file == null — хранить только в памяти (для тестов). */
@@ -201,6 +204,47 @@ public final class Store {
         save();
     }
 
+    // ---------- Расходы ----------
+
+    public synchronized List<Expense> expenses(int year) {
+        return expenses.stream()
+                .filter(e -> e.date.getYear() == year)
+                .sorted(Comparator.comparing((Expense e) -> e.date).thenComparing(e -> e.id).reversed())
+                .toList();
+    }
+
+    public synchronized List<Expense> allExpenses() {
+        return expenses.stream()
+                .sorted(Comparator.comparing((Expense e) -> e.date).thenComparing(e -> e.id))
+                .toList();
+    }
+
+    public synchronized Expense addExpense(Expense e) {
+        e.id = nextId++;
+        expenses.add(e);
+        save();
+        return e;
+    }
+
+    public synchronized void deleteExpense(long id) {
+        if (!expenses.removeIf(e -> e.id == id)) throw new ApiException(404, "Запись о расходе не найдена");
+        save();
+    }
+
+    // ---------- Настройки импорта ----------
+
+    public synchronized Map<String, Map<String, Object>> importProfiles() {
+        return new LinkedHashMap<>(importProfiles);
+    }
+
+    public synchronized void saveImportProfile(String signature, Map<String, Object> mapping) {
+        importProfiles.remove(signature);
+        importProfiles.put(signature, mapping);
+        // Хватит с запасом на все банки пользователя; самые старые настройки уходят первыми.
+        while (importProfiles.size() > 20) importProfiles.remove(importProfiles.keySet().iterator().next());
+        save();
+    }
+
     // ---------- Экспорт ----------
 
     /** Все данные в том же виде, что и в файле. */
@@ -212,6 +256,8 @@ public final class Store {
         root.put("incomes", incomes.stream().map(Income::toJson).toList());
         root.put("invoices", invoices.stream().map(Invoice::toJson).toList());
         root.put("payments", payments.stream().map(TaxPayment::toJson).toList());
+        root.put("expenses", expenses.stream().map(Expense::toJson).toList());
+        root.put("importProfiles", new LinkedHashMap<>(importProfiles));
         return root;
     }
 
@@ -237,6 +283,8 @@ public final class Store {
         incomes.clear();
         invoices.clear();
         payments.clear();
+        expenses.clear();
+        importProfiles.clear();
         nextId = 1;
         if (Files.exists(file)) load();
     }
@@ -270,6 +318,18 @@ public final class Store {
                 inv.status = InvoiceStatus.valueOf((String) m.get("status"));
                 invoices.add(inv);
             }
+            for (Map<String, Object> m : objects(root.get("expenses"))) {
+                Expense e = Codec.expense(m);
+                e.id = longValue(m.get("id"), 0);
+                expenses.add(e);
+            }
+            if (root.get("importProfiles") instanceof Map<?, ?> profiles) {
+                for (Map.Entry<?, ?> e : profiles.entrySet()) {
+                    if (e.getValue() instanceof Map<?, ?> m) {
+                        importProfiles.put((String) e.getKey(), Codec.importProfile((Map<String, Object>) m));
+                    }
+                }
+            }
             for (Map<String, Object> m : objects(root.get("payments"))) {
                 TaxPayment p = Codec.taxPayment(m);
                 p.id = longValue(m.get("id"), 0);
@@ -283,6 +343,7 @@ public final class Store {
         for (Income i : incomes) maxId = Math.max(maxId, i.id);
         for (Invoice i : invoices) maxId = Math.max(maxId, i.id);
         for (TaxPayment p : payments) maxId = Math.max(maxId, p.id);
+        for (Expense e : expenses) maxId = Math.max(maxId, e.id);
         nextId = Math.max(nextId, maxId + 1);
     }
 

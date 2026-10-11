@@ -1,5 +1,6 @@
 package am.pulsar.tax;
 
+import am.pulsar.tax.Model.Expense;
 import am.pulsar.tax.Model.Income;
 import am.pulsar.tax.Model.Invoice;
 
@@ -25,6 +26,15 @@ final class Csv {
         row(sb, "number", "date", "due_date", "client", "client_tin", "total_amd", "status", "e_invoice_number");
         for (Invoice i : list) {
             row(sb, i.number, i.date, i.dueDate, i.client, i.clientTin, i.total(), i.status, i.eInvoiceNumber);
+        }
+        return sb.toString();
+    }
+
+    static String expenses(List<Expense> list) {
+        StringBuilder sb = new StringBuilder("\uFEFF");
+        row(sb, "date", "amount_amd", "category", "description");
+        for (Expense e : list) {
+            row(sb, e.date, e.amount, e.category, e.description);
         }
         return sb.toString();
     }

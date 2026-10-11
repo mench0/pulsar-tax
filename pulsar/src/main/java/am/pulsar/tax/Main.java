@@ -21,6 +21,7 @@ import java.util.concurrent.TimeUnit;
  *   PULSAR_SECURE_COOKIE  — 1, если сервер работает за HTTPS
  *   PULSAR_TELEGRAM_TOKEN — токен бота от @BotFather; без него напоминания в Telegram выключены
  *   PULSAR_ALLOWED_ORIGINS — адреса фронтенда через запятую, например https://app.pulsar.am
+ *   PULSAR_CBA_URL         — адрес API курсов ЦБ РА (по умолчанию https://api.cba.am/exchangerates.asmx)
  *   PULSAR_COOKIE_SAMESITE — Strict (по умолчанию), Lax или None (фронтенд на другом домене, нужен HTTPS)
  */
 public final class Main {
@@ -38,7 +39,8 @@ public final class Main {
                 env("PULSAR_SECURE_COOKIE", "0").equals("1"),
                 !env("PULSAR_SIGNUP", "open").equals("closed"),
                 env("PULSAR_COOKIE_SAMESITE", "Strict"),
-                origins(env("PULSAR_ALLOWED_ORIGINS", "")));
+                origins(env("PULSAR_ALLOWED_ORIGINS", "")),
+                env("PULSAR_CBA_URL", Rates.DEFAULT_BASE));
 
         // Файл данных версии без учётных записей переходит к первому зарегистрированному.
         Accounts accounts = new Accounts(dir, dir.resolve("pulsar.json"));

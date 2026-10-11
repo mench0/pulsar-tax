@@ -1,5 +1,6 @@
 package am.pulsar.tax;
 
+import am.pulsar.tax.Model.Expense;
 import am.pulsar.tax.Model.Income;
 import am.pulsar.tax.Model.Profile;
 import am.pulsar.tax.Model.TaxPayment;
@@ -25,10 +26,21 @@ final class Summary {
 
     static Map<String, Object> build(Profile profile, List<Income> yearIncomes, List<TaxPayment> yearPayments,
                                      int year, LocalDate today) {
+        return build(profile, yearIncomes, yearPayments, List.of(), year, today);
+    }
+
+    /** Сводка с расходами: они показываются рядом с доходом, но на налог пока не влияют. */
+    static Map<String, Object> build(Profile profile, List<Income> yearIncomes, List<TaxPayment> yearPayments,
+                                     List<Expense> yearExpenses, int year, LocalDate today) {
         BigDecimal[] byQuarter = zeros(4);
         for (Income i : yearIncomes) {
             int q = (i.date.getMonthValue() - 1) / 3;
             byQuarter[q] = byQuarter[q].add(i.amount);
+        }
+        BigDecimal[] spent = zeros(4);
+        for (Expense e : yearExpenses) {
+            int q = (e.date.getMonthValue() - 1) / 3;
+            spent[q] = spent[q].add(e.amount);
         }
         // Индекс 0 — уплаты за год целиком (микробизнес), 1–4 — за кварталы.
         BigDecimal[] paid = zeros(5);
@@ -52,6 +64,7 @@ final class Summary {
             qm.put("tax", tax);
             qm.put("paid", paid[q + 1]);
             qm.put("due", due);
+            qm.put("expenses", spent[q]);
             qm.put("dueDate", turnover ? quarterDue(year, q + 1) : null);
             quarters.add(qm);
             total = total.add(byQuarter[q]);
@@ -84,6 +97,9 @@ final class Summary {
         m.put("totalTax", totalTax);
         m.put("totalPaid", totalPaid);
         m.put("totalDue", totalTax == null ? null : totalDue);
+        m.put("totalExpenses", Arrays.stream(spent).reduce(BigDecimal.ZERO, BigDecimal::add));
+        // «Копилка»: какую долю каждого поступления откладывать на налог — это и есть ставка.
+        m.put("setAsidePercent", rate);
         m.put("threshold", limit);
         m.put("remaining", limit == null ? null : limit.subtract(total).max(BigDecimal.ZERO));
         m.put("thresholdPercent", TaxRules.percentOf(total, limit));
