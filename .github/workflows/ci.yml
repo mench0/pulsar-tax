@@ -8,9 +8,6 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: pulsar
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -18,10 +15,10 @@ jobs:
           distribution: temurin
           java-version: 21
           cache: maven
-      # Тесты поднимают встроенный PostgreSQL сами: отдельная база не нужна.
+      # Тесты поднимают временный PostgreSQL сами: отдельная база не нужна.
       - run: ./mvnw -B verify
       - uses: actions/upload-artifact@v4
         with:
           name: pulsar-tax-jar
-          path: pulsar/app/target/pulsar-tax.jar
+          path: app/target/pulsar-tax.jar
           retention-days: 7
