@@ -5,3 +5,4 @@ backend/
 .idea/
 .vscode/
 .DS_Store
+target/
