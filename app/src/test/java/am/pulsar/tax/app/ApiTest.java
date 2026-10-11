@@ -555,6 +555,40 @@ class ApiTest {
     }
 
     @Test
+    void reserveAndForecast() throws Exception {
+        ApiClient c = client().register("plan@example.am");
+        c.json("PUT", "/api/profile", "{\"regime\":\"TURNOVER\",\"activity\":\"TRADE\"}");
+        c.json("POST", "/api/incomes", "{\"date\":\"2026-07-10\",\"amount\":500000}"); // 3 кв.: 50 000 налога
+        c.json("POST", "/api/payments", "{\"year\":2026,\"quarter\":3,\"date\":\"2026-10-05\",\"amount\":20000}");
+        c.json("POST", "/api/invoices", "{\"client\":\"А\",\"date\":\"2026-10-01\",\"dueDate\":\"2026-11-20\","
+                + "\"items\":[{\"name\":\"x\",\"quantity\":1,\"price\":100000}]}");
+
+        JsonNode r = c.json("GET", "/api/planning/reserve", null);
+        JsonNode q3 = null;
+        for (JsonNode o : r.path("obligations")) if (o.path("year").asInt() == 2026 && o.path("quarter").asInt() == 3) q3 = o;
+        assertNotNull(q3);
+        assertEquals(50000, q3.path("accrued").asInt());
+        assertEquals(20000, q3.path("paid").asInt());
+        assertEquals(30000, q3.path("due").asInt());
+        assertEquals(30000, r.path("accruedUnpaid").asInt());
+        assertEquals(10000, r.path("expectedOnReceivables").asInt()); // оценка: 10% от неоплаченного счёта
+        assertEquals(40000, r.path("recommended").asInt());
+        assertTrue(r.path("gap").isNull());
+        assertTrue(r.path("notes").toString().contains("ACTUAL_RESERVE_UNKNOWN"));
+
+        assertEquals(400, c.status("PUT", "/api/planning/balances", "{\"reserveBalance\":-1}"));
+        c.json("PUT", "/api/planning/balances", "{\"reserveBalance\":25000,\"cashBalance\":100000}");
+        r = c.json("GET", "/api/planning/reserve", null);
+        assertEquals(15000, r.path("gap").asInt()); // не хватает 15 000
+
+        JsonNode f = c.json("GET", "/api/planning/forecast?months=3", null);
+        assertEquals(3, f.path("projection").size());
+        assertEquals(100000, f.path("startingCash").asInt());
+        assertTrue(f.path("assumptions").toString().contains("RECEIVABLES_PAID_ON_DUE_DATE"));
+        assertEquals(400, c.status("GET", "/api/planning/forecast?months=40", null));
+    }
+
+    @Test
     void importDedupe() throws Exception {
         ApiClient c = client().register("import@example.am");
         String batch = "{\"items\":[{\"date\":\"2026-05-01\",\"amount\":100,\"importKey\":\"k1\"},"
