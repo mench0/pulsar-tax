@@ -340,6 +340,64 @@ class ApiTest {
     }
 
     @Test
+    void reportReadinessPrepareAndManualFiling() throws Exception {
+        ApiClient c = client().register("report@example.am");
+        c.json("PUT", "/api/profile", "{\"regime\":\"TURNOVER\",\"activity\":\"TRADE\",\"tin\":\"12345678\"}");
+        long income = c.json("POST", "/api/incomes", "{\"date\":\"2026-04-10\",\"amount\":300000}").path("id").asLong();
+        c.json("POST", "/api/bank/statements", statement("",
+                "[\"12.05.2026\",\"-1000\",\"AMD\",\"\",\"что-то\"]", null));
+
+        JsonNode r = c.json("GET", "/api/reports/readiness?year=2026&quarter=2", null);
+        assertEquals("TURNOVER_QUARTERLY", r.path("type").asString());
+        assertFalse(r.path("ready").asBoolean());
+        assertTrue(r.path("checks").toString().contains("UNREVIEWED_TRANSACTIONS"));
+        assertEquals("2026-07-20", r.path("deadline").asString());
+        assertEquals(1, r.path("sources").path("manualIncomes").asInt());
+        assertTrue(r.path("instructions").toString().contains("PAY_TAX"));
+        assertTrue(c.error("POST", "/api/reports", "{\"year\":2026,\"quarter\":2}").contains("UNREVIEWED_TRANSACTIONS"));
+
+        long tx = c.json("GET", "/api/bank/transactions?status=NEEDS_REVIEW", null).get(0).path("id").asLong();
+        c.json("POST", "/api/bank/transactions/" + tx + "/review", "{\"kind\":\"EXPENSE\"}");
+        r = c.json("GET", "/api/reports/readiness?year=2026&quarter=2", null);
+        assertTrue(r.path("ready").asBoolean());
+        assertTrue(r.path("checks").toString().contains("MONTHS_WITHOUT_BANK_DATA")); // апрель и июнь без выписки
+        assertTrue(r.path("checks").toString().contains("DEADLINE_PASSED"));
+        assertTrue(c.error("POST", "/api/reports", "{\"year\":2026,\"quarter\":2}").startsWith("Подтвердите предупреждения"));
+
+        JsonNode v1 = c.json("POST", "/api/reports", "{\"year\":2026,\"quarter\":2,\"acceptWarnings\":true}");
+        assertEquals("PREPARED", v1.path("status").asString());
+        assertEquals(30000, v1.path("accrued").asInt());
+        long id1 = v1.path("id").asLong();
+        assertFalse(c.json("GET", "/api/reports/" + id1, null).path("stale").asBoolean());
+        String csv = c.call("GET", "/api/reports/" + id1 + "/export.csv", null).body();
+        assertTrue(csv.contains("turnover_amd;300000"));
+        assertTrue(csv.contains("tax_accrued_amd;30000"));
+
+        // Отметку о подаче ставит пользователь; дата в будущем недопустима.
+        assertEquals(400, c.status("POST", "/api/reports/" + id1 + "/filed", "{\"filedOn\":\"2099-01-01\"}"));
+        JsonNode filed = c.json("POST", "/api/reports/" + id1 + "/filed", "{\"filedOn\":\"2026-07-15\",\"reference\":\"№ 123\"}");
+        assertEquals("FILED_MANUALLY", filed.path("status").asString());
+
+        // Данные изменились после подготовки — отчёт устарел, видно, что именно поменялось.
+        c.json("PATCH", "/api/incomes", "{\"id\":" + income + ",\"amount\":310000}");
+        JsonNode stale = c.json("GET", "/api/reports/" + id1, null);
+        assertTrue(stale.path("stale").asBoolean());
+        assertEquals(1000, stale.path("changes").path("totals").path("accrued").get(2).asInt());
+        JsonNode v2 = c.json("POST", "/api/reports", "{\"year\":2026,\"quarter\":2,\"acceptWarnings\":true}");
+        assertEquals(2, v2.path("version").asInt());
+        JsonNode list = c.json("GET", "/api/reports?year=2026", null);
+        assertEquals("PREPARED", list.get(0).path("status").asString());
+        assertEquals("FILED_MANUALLY", list.get(1).path("status").asString()); // поданная версия не перезаписывается
+        assertTrue(c.json("GET", "/api/reports/readiness?year=2026&quarter=2", null).path("checks").toString().contains("ALREADY_FILED"));
+
+        // Микробизнес — годовой отчёт; квартал не нужен.
+        ApiClient m = client().register("report-micro@example.am");
+        assertEquals("MICRO_ANNUAL", m.json("GET", "/api/reports/readiness?year=2026", null).path("type").asString());
+        assertEquals(400, c.status("GET", "/api/reports/readiness?year=2026", null)); // для оборота нужен квартал
+        assertEquals(404, m.status("GET", "/api/reports/" + id1, null));
+    }
+
+    @Test
     void importDedupe() throws Exception {
         ApiClient c = client().register("import@example.am");
         String batch = "{\"items\":[{\"date\":\"2026-05-01\",\"amount\":100,\"importKey\":\"k1\"},"
