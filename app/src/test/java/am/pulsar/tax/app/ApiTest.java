@@ -198,6 +198,33 @@ class ApiTest {
     }
 
     @Test
+    void taxCalculationAndSnapshots() throws Exception {
+        ApiClient c = client().register("calc@example.am");
+        c.json("PUT", "/api/profile", "{\"regime\":\"TURNOVER\",\"activity\":\"TRADE\"}");
+        long id = c.json("POST", "/api/incomes", "{\"date\":\"2026-02-10\",\"amount\":100000}").path("id").asLong();
+        c.json("POST", "/api/expenses", "{\"date\":\"2026-02-11\",\"amount\":50000}");
+        JsonNode calc = c.json("GET", "/api/tax/calculation?year=2026&quarter=1", null);
+        assertEquals(10000, calc.path("totals").path("accrued").asInt());
+        assertEquals(100000, calc.path("totals").path("taxBase").asInt());
+        assertEquals(50000, calc.path("totals").path("expenses").asInt());
+        assertEquals("TURNOVER_RATE.TRADE", calc.path("rules").get(0).path("code").asString());
+        assertEquals("OFFICIAL_SUMMARY", calc.path("rules").get(0).path("basis").path("status").asString());
+        assertEquals(400, c.status("GET", "/api/tax/calculation?year=2026&quarter=5", null));
+
+        long snap = c.json("POST", "/api/tax/snapshots", "{\"year\":2026,\"quarter\":1,\"reason\":\"до правки\"}").path("id").asLong();
+        assertFalse(c.json("GET", "/api/tax/snapshots/" + snap + "/diff", null).path("changed").asBoolean());
+        c.json("PATCH", "/api/incomes", "{\"id\":" + id + ",\"amount\":120000}");
+        JsonNode diff = c.json("GET", "/api/tax/snapshots/" + snap + "/diff", null);
+        assertTrue(diff.path("changed").asBoolean());
+        assertEquals("CHANGED", diff.path("lines").get(0).path("kind").asString());
+        assertEquals(2000, diff.path("totals").path("accrued").get(2).asInt());
+        assertEquals(1, c.json("GET", "/api/tax/snapshots?year=2026", null).size());
+        assertEquals(10000, c.json("GET", "/api/tax/snapshots/" + snap, null).path("totals").path("accrued").asInt());
+        // Чужой снимок недоступен.
+        assertEquals(404, client().register("calc2@example.am").status("GET", "/api/tax/snapshots/" + snap + "/diff", null));
+    }
+
+    @Test
     void importDedupe() throws Exception {
         ApiClient c = client().register("import@example.am");
         String batch = "{\"items\":[{\"date\":\"2026-05-01\",\"amount\":100,\"importKey\":\"k1\"},"
