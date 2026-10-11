@@ -1,0 +1,32 @@
+# API и PostgreSQL одной командой: docker compose up -d
+# Перед выкладкой смените пароль базы и укажите адрес фронтенда в PULSAR_ALLOWED_ORIGINS.
+services:
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: pulsar
+      POSTGRES_USER: pulsar
+      POSTGRES_PASSWORD: change-me
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pulsar"]
+      interval: 5s
+      retries: 10
+
+  api:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PULSAR_DB_URL: jdbc:postgresql://db:5432/pulsar
+      PULSAR_DB_USER: pulsar
+      PULSAR_DB_PASSWORD: change-me
+      PULSAR_ALLOWED_ORIGINS: http://localhost:5000
+      # За HTTPS-прокси: PULSAR_SECURE_COOKIE: "true"
+    ports:
+      - "127.0.0.1:8080:8080"
+
+volumes:
+  pgdata:
