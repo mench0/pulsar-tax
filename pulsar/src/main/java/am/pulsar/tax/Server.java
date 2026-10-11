@@ -1,5 +1,6 @@
 package am.pulsar.tax;
 
+import am.pulsar.tax.Model.Expense;
 import am.pulsar.tax.Model.Income;
 import am.pulsar.tax.Model.Invoice;
 import am.pulsar.tax.Model.TaxPayment;
@@ -33,9 +34,15 @@ public final class Server {
      * @param sameSite       атрибут SameSite у cookie: Strict, если фронтенд на том же сайте
      *                       (app.example.am и api.example.am), None — если на другом домене
      * @param allowedOrigins адреса фронтенда, которым разрешены запросы с cookie (CORS)
+     * @param ratesUrl       адрес API курсов ЦБ РА (в тестах — заглушка)
      */
-    public record Options(boolean secureCookie, boolean signupOpen, String sameSite, Set<String> allowedOrigins) {
+    public record Options(boolean secureCookie, boolean signupOpen, String sameSite, Set<String> allowedOrigins,
+                          String ratesUrl) {
         public static final Options DEFAULT = new Options(false, true, "Strict", Set.of());
+
+        public Options(boolean secureCookie, boolean signupOpen, String sameSite, Set<String> allowedOrigins) {
+            this(secureCookie, signupOpen, sameSite, allowedOrigins, Rates.DEFAULT_BASE);
+        }
 
         public Options {
             if (!Set.of("Strict", "Lax", "None").contains(sameSite)) {
@@ -60,7 +67,9 @@ public final class Server {
     private static final int MAX_IMPORT = 5000;
     private static final String COOKIE = "pulsar_session";
     private static final Pattern ID_PATH =
-            Pattern.compile("^/api/(incomes|invoices|payments)/(\\d+)(/paid|/einvoice)?$");
+            Pattern.compile("^/api/(incomes|invoices|payments|expenses)/(\\d+)(/paid|/einvoice)?$");
+    /** Отпечаток заголовка выписки, который приложение считает само. */
+    private static final Pattern PROFILE_PATH = Pattern.compile("^/api/import-profiles/([0-9a-z-]{4,64})$");
     private static final Pattern CAL_PATH = Pattern.compile("^/cal/([0-9a-f]{40})\\.ics$");
     /** Имена, по которым к серверу на 127.0.0.1 обращается сам браузер пользователя. */
     private static final Set<String> LOCAL_HOSTS = Set.of("127.0.0.1", "localhost", "[::1]");
@@ -68,6 +77,7 @@ public final class Server {
     private final Accounts accounts;
     private final Telegram telegram;
     private final Options options;
+    private final Rates rates;
     private final HttpServer http;
     /** Сервер слушает только этот компьютер — тогда проверяем заголовок Host против DNS rebinding. */
     private final boolean loopbackOnly;
@@ -76,6 +86,7 @@ public final class Server {
         this.accounts = accounts;
         this.telegram = telegram;
         this.options = options;
+        this.rates = new Rates(options.ratesUrl());
         InetSocketAddress address = new InetSocketAddress(host, port);
         this.loopbackOnly = address.getAddress() != null && address.getAddress().isLoopbackAddress();
         this.http = HttpServer.create(address, 0);
@@ -137,14 +148,12 @@ public final class Server {
                 }
                 Accounts.User u = accounts.register(str(b.get("email")), str(b.get("password")));
                 if (b.get("lang") instanceof String l && Accounts.LANGUAGES.contains(l)) accounts.setLang(u, l);
-                setSession(ex, accounts.newSession(u));
-                return new Reply(201, me(u));
+                return new Reply(201, issueSession(ex, tokenAuth(b), accounts.newSession(u), u));
             }
             case "POST /api/auth/login": {
                 Map<String, Object> b = body(ex);
                 String token = accounts.login(str(b.get("email")), str(b.get("password")));
-                setSession(ex, token);
-                return me(accounts.bySession(token));
+                return issueSession(ex, tokenAuth(b), token, accounts.bySession(token));
             }
             case "POST /api/auth/logout":
                 accounts.logout(sessionToken(ex));
@@ -171,8 +180,7 @@ public final class Server {
             case "POST /api/account/password": {
                 Map<String, Object> b = body(ex);
                 accounts.changePassword(user, str(b.get("oldPassword")), str(b.get("newPassword")));
-                setSession(ex, accounts.newSession(user));
-                return me(user);
+                return issueSession(ex, bearer(ex) != null, accounts.newSession(user), user);
             }
             case "POST /api/account/telegram": {
                 if (telegram == null) throw new ApiException(400, "Telegram на этом сервере не настроен");
@@ -190,7 +198,8 @@ public final class Server {
             case "GET /api/summary": {
                 LocalDate today = today();
                 int year = year(q, today);
-                return Summary.build(store.profile(), store.incomes(year), store.payments(year), year, today);
+                return Summary.build(store.profile(), store.incomes(year), store.payments(year), store.expenses(year),
+                        year, today);
             }
             case "GET /api/incomes":
                 return store.incomes(year(q, today())).stream().map(Income::toJson).toList();
@@ -206,6 +215,23 @@ public final class Server {
                 return store.payments(year(q, today())).stream().map(TaxPayment::toJson).toList();
             case "POST /api/payments":
                 return new Reply(201, store.addPayment(Codec.taxPayment(body(ex))).toJson());
+            case "GET /api/expenses":
+                return store.expenses(year(q, today())).stream().map(Expense::toJson).toList();
+            case "POST /api/expenses":
+                return new Reply(201, store.addExpense(Codec.expense(body(ex))).toJson());
+            case "GET /api/import-profiles":
+                return store.importProfiles();
+            case "GET /api/rates": {
+                LocalDate today = today();
+                LocalDate date = q.containsKey("date") ? new Fields(Map.of("date", q.get("date"))).date("date", true) : today;
+                Map<String, Object> m = new LinkedHashMap<>();
+                m.put("date", date);
+                m.put("source", "cba.am");
+                m.put("rates", rates.on(date, today));
+                return m;
+            }
+            case "GET /api/export/expenses.csv":
+                return new Raw("text/csv; charset=utf-8", Csv.expenses(store.allExpenses()), "expenses.csv");
             case "GET /api/export/data.json":
                 return new Raw("application/json; charset=utf-8", Json.write(store.toJson()), "pulsar-tax.json");
             case "GET /api/export/incomes.csv":
@@ -216,6 +242,12 @@ public final class Server {
                 break;
         }
 
+        Matcher profile = PROFILE_PATH.matcher(path);
+        if (profile.matches() && method.equals("PUT")) {
+            store.saveImportProfile(profile.group(1), Codec.importProfile(body(ex)));
+            return null;
+        }
+
         Matcher m = ID_PATH.matcher(path);
         if (m.matches()) {
             long id = Long.parseLong(m.group(2));
@@ -224,6 +256,9 @@ public final class Server {
             switch (kind + action + " " + method) {
                 case "incomes DELETE":
                     store.deleteIncome(id);
+                    return null;
+                case "expenses DELETE":
+                    store.deleteExpense(id);
                     return null;
                 case "payments DELETE":
                     store.deletePayment(id);
@@ -298,8 +333,27 @@ public final class Server {
 
     // ---------- Сессия ----------
 
-    private void setSession(HttpExchange ex, String token) {
-        ex.getResponseHeaders().add("Set-Cookie", cookie(token, Accounts.SESSION_DAYS * 86400));
+    /**
+     * Выдаёт сессию. Браузеру — в cookie HttpOnly, чтобы скрипт страницы не мог её прочитать.
+     * Мобильному приложению (tokenAuth) — токеном в ответе: дальше оно шлёт его в Authorization: Bearer.
+     */
+    private Map<String, Object> issueSession(HttpExchange ex, boolean tokenAuth, String token, Accounts.User u) {
+        Map<String, Object> m = me(u);
+        if (tokenAuth) {
+            m.put("token", token);
+        } else {
+            ex.getResponseHeaders().add("Set-Cookie", cookie(token, Accounts.SESSION_DAYS * 86400));
+        }
+        return m;
+    }
+
+    private static boolean tokenAuth(Map<String, Object> body) {
+        return Boolean.TRUE.equals(body.get("tokenAuth"));
+    }
+
+    private static String bearer(HttpExchange ex) {
+        String h = ex.getRequestHeaders().getFirst("Authorization");
+        return h != null && h.regionMatches(true, 0, "Bearer ", 0, 7) ? h.substring(7).trim() : null;
     }
 
     private String cookie(String value, long maxAge) {
@@ -307,7 +361,10 @@ public final class Server {
                 + (options.secureCookie ? "; Secure" : "");
     }
 
+    /** Токен сессии: из Authorization: Bearer (приложение) или из cookie (браузер). */
     private static String sessionToken(HttpExchange ex) {
+        String b = bearer(ex);
+        if (b != null) return b;
         for (String header : ex.getRequestHeaders().getOrDefault("Cookie", List.of())) {
             for (String part : header.split(";")) {
                 String p = part.trim();
@@ -368,7 +425,7 @@ public final class Server {
         if (!ex.getRequestMethod().equals("OPTIONS")) return false;
         if (!allowed) throw new ApiException(403, "Запрос с другого сайта отклонён");
         ex.getResponseHeaders().set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE");
-        ex.getResponseHeaders().set("Access-Control-Allow-Headers", "Content-Type");
+        ex.getResponseHeaders().set("Access-Control-Allow-Headers", "Content-Type, Authorization");
         ex.getResponseHeaders().set("Access-Control-Max-Age", "600");
         send(ex, 204, null, null);
         return true;

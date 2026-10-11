@@ -6,6 +6,7 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.LocalDate;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -87,6 +88,39 @@ final class Codec {
         }
         inv.items = items;
         return inv;
+    }
+
+    static Expense expense(Map<String, Object> json) {
+        Fields f = new Fields(json);
+        Expense e = new Expense();
+        e.date = f.date("date", true);
+        e.amount = f.dec("amount", true);
+        if (e.amount.signum() <= 0) throw new ApiException(400, "Сумма расхода должна быть больше нуля");
+        if (e.amount.scale() > 2) throw new ApiException(400, "Сумма расхода: не больше 2 знаков после запятой");
+        e.category = json.get("category") == null ? ExpenseCategory.OTHER : f.enumValue("category", ExpenseCategory.class);
+        e.description = f.str("description", 500, false);
+        return e;
+    }
+
+    /**
+     * Сохранённое сопоставление колонок выписки. Ключи — как в приложении (date, amount, debit, desc,
+     * currencyCol — номера колонок, -1 — нет; dateFormat, currency — строки).
+     */
+    static Map<String, Object> importProfile(Map<String, Object> json) {
+        Fields f = new Fields(json);
+        Map<String, Object> m = new LinkedHashMap<>();
+        for (String key : List.of("date", "amount", "debit", "desc", "currencyCol")) {
+            BigDecimal v = f.dec(key, true);
+            if (v.scale() > 0 || v.intValue() < -1 || v.intValue() > 200) throw new ApiException(400, "Неверная колонка «" + key + "»");
+            m.put(key, v.intValue());
+        }
+        String dateFormat = f.str("dateFormat", 20, true);
+        if (!List.of("dd.mm.yyyy", "yyyy-mm-dd", "mm/dd/yyyy").contains(dateFormat)) {
+            throw new ApiException(400, "Неизвестный формат даты: " + dateFormat);
+        }
+        m.put("dateFormat", dateFormat);
+        m.put("currency", f.enumValue("currency", Currency.class));
+        return m;
     }
 
     static TaxPayment taxPayment(Map<String, Object> json) {
