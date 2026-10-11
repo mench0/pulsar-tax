@@ -48,7 +48,6 @@ Maven-проект из двух модулей: `dto` — модели запр
 Нужны **Java 21+** и **PostgreSQL 14+** (Maven скачается сам через `mvnw`). Проще всего поднять базу в Docker:
 
 ```bash
-cd pulsar
 docker compose up -d db       # PostgreSQL на localhost:5432, база и пользователь pulsar, пароль pulsar
 ./mvnw verify                 # тесты и сборка app/target/pulsar-tax.jar
 java -jar app/target/pulsar-tax.jar
