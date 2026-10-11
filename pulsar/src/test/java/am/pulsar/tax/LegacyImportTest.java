@@ -15,7 +15,7 @@ import java.time.Instant;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /** Перенос папки данных версии на файлах: пароль, сессия и данные ИП переживают переход на PostgreSQL. */
-@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT, classes = {PulsarApplication.class, TestDatabaseConfig.class})
 class LegacyImportTest {
 
     static final String SESSION = "ab".repeat(32);
@@ -42,8 +42,6 @@ class LegacyImportTest {
                  "payments":[{"id":5,"year":2026,"quarter":1,"date":"2026-04-10","amount":300}],
                  "expenses":[{"id":6,"date":"2026-02-05","amount":50,"category":"RENT","description":"Офис"}],
                  "importProfiles":{"abcd":{"date":0,"amount":1,"debit":-1,"desc":2,"currencyCol":-1,"dateFormat":"dd.mm.yyyy","currency":"AMD"}}}""");
-        String db = Files.createTempDirectory("pulsar-legacy-db").toString();
-        r.add("pulsar.data-dir", () -> db);
         r.add("pulsar.import-legacy", old::toString);
     }
 

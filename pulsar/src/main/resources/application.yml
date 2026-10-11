@@ -16,10 +16,10 @@ spring:
     virtual:
       enabled: true
   datasource:
-    # Пусто — встроенный PostgreSQL в PULSAR_DATA_DIR/pg (разработка). На сервере — адрес настоящей базы.
-    url: ${PULSAR_DB_URL:}
-    username: ${PULSAR_DB_USER:}
-    password: ${PULSAR_DB_PASSWORD:}
+    # Внешний PostgreSQL. По умолчанию — локальная база для разработки (docker compose up -d db).
+    url: ${PULSAR_DB_URL:jdbc:postgresql://localhost:5432/pulsar}
+    username: ${PULSAR_DB_USER:pulsar}
+    password: ${PULSAR_DB_PASSWORD:pulsar}
   jpa:
     open-in-view: false
     hibernate:
@@ -44,7 +44,6 @@ management:
         enabled: true
 
 pulsar:
-  data-dir: ${PULSAR_DATA_DIR:data}
   signup: ${PULSAR_SIGNUP:open}
   secure-cookie: ${PULSAR_SECURE_COOKIE:false}
   cookie-same-site: ${PULSAR_COOKIE_SAMESITE:Strict}
