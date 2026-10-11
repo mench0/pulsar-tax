@@ -15,7 +15,7 @@ jobs:
           distribution: temurin
           java-version: 21
           cache: maven
-      # Тесты поднимают временный PostgreSQL сами: отдельная база не нужна.
+      # Тесты поднимают PostgreSQL в контейнере (Testcontainers): Docker на раннере GitHub уже есть.
       - run: ./mvnw -B verify
       - uses: actions/upload-artifact@v4
         with:

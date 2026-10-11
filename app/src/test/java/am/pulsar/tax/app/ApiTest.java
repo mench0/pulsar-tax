@@ -18,7 +18,7 @@ import java.util.concurrent.Future;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-/** API целиком: настоящий сервер, временный PostgreSQL (TestDatabaseConfig), заглушки ЦБ РА и Telegram. */
+/** API целиком: настоящий сервер, PostgreSQL в Testcontainers (TestDatabaseConfig), заглушки ЦБ РА и Telegram. */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT, classes = {PulsarApplication.class, TestDatabaseConfig.class})
 class ApiTest {
 

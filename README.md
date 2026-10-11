@@ -61,8 +61,8 @@ java -jar app/target/pulsar-tax.jar
 pulsar-tax-web (см. его README): пока API слушает только 127.0.0.1, он принимает запросы фронтенда с любого
 локального порта.
 
-Тестам бэкенда своя база не нужна: они поднимают временный PostgreSQL на время прогона (только в тестах,
-в jar его нет). Временный PostgreSQL не запускается от root — запускайте тесты от обычного пользователя.
+Тестам бэкенда своя база не нужна: они поднимают PostgreSQL 17 в контейнере через Testcontainers
+(`TestDatabaseConfig`). Для `./mvnw verify` нужен запущенный Docker (Docker Desktop или Docker Engine).
 
 ## Выкладка на сервер
 
@@ -165,7 +165,7 @@ app/src/main/resources/
   db/migration/      SQL-миграции Flyway
 app/src/test/java/am/pulsar/tax/app/
   RulesTest          налоги, сводка, сроки, CSV, разбор чисел и курсов
-  ApiTest            API целиком на временном PostgreSQL с заглушками ЦБ РА и Telegram
+  ApiTest            API целиком на PostgreSQL в Testcontainers с заглушками ЦБ РА и Telegram
   LegacyImportTest   перенос старых данных
 ```
 

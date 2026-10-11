@@ -1,25 +1,20 @@
-package am.pulsar.tax.app;import io.zonky.test.db.postgres.embedded.EmbeddedPostgres;
-import org.springframework.boot.test.context.TestConfiguration;
-import org.springframework.context.annotation.Bean;
+package am.pulsar.tax.app;
 
-import java.io.IOException;
-import javax.sql.DataSource;
+import org.springframework.boot.test.context.TestConfiguration;
+import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
+import org.springframework.context.annotation.Bean;
+import org.testcontainers.postgresql.PostgreSQLContainer;
 
 /**
- * PostgreSQL для тестов: настоящий сервер, поднятый на время прогона во временной папке.
- * Само приложение работает только с внешней базой (PULSAR_DB_URL).
+ * PostgreSQL для тестов в контейнере Testcontainers: настоящий сервер той же версии, что в docker-compose.yml.
+ * Приложение подключается к нему само (@ServiceConnection). Нужен запущенный Docker.
  */
 @TestConfiguration(proxyBeanMethods = false)
 public class TestDatabaseConfig {
 
-    @Bean(destroyMethod = "close")
-    EmbeddedPostgres testPostgres() throws IOException {
-        // Локаль UTF-8, как у PostgreSQL на сервере: иначе lower() не меняет кириллицу и поиск без учёта регистра не работает.
-        return EmbeddedPostgres.builder().setLocaleConfig("locale", "C.UTF-8").start();
-    }
-
     @Bean
-    DataSource dataSource(EmbeddedPostgres pg) {
-        return pg.getPostgresDatabase();
+    @ServiceConnection
+    PostgreSQLContainer postgres() {
+        return new PostgreSQLContainer("postgres:17");
     }
 }
