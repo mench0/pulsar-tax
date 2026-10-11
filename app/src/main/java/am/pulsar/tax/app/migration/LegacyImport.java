@@ -46,7 +46,7 @@ import java.util.Map;
 
 /**
  * Перенос данных версии на файлах (users.json и users/{id}.json) в базу. Запускается, если задан
- * PULSAR_IMPORT_LEGACY и в базе ещё нет пользователей. Пароли переносятся как есть (формат хэшей не изменился);
+ * PULSAR_IMPORT_LEGACY; пользователи, чья почта уже есть в базе, пропускаются. Пароли переносятся как есть (формат хэшей не изменился);
  * действующие сессии попадают в хранилище сессий и живут его TTL.
  */
 @Slf4j
@@ -80,16 +80,19 @@ public class LegacyImport implements ApplicationRunner {
         if (!Files.exists(usersFile)) {
             throw new IllegalStateException("Нет файла " + usersFile.toAbsolutePath());
         }
-        if (userRepository.count() > 0) {
-            log.info("Перенос старых данных пропущен: в базе уже есть пользователи");
-            return;
-        }
-        int count = 0;
+        int imported = 0;
+        int skipped = 0;
         for (JsonNode u : json.readTree(Files.readString(usersFile)).path("users")) {
+            // Повторный запуск и пользователь, созданный до переноса (например, R__FirstUser), не дублируются.
+            if (userRepository.findByEmail(u.path("email").asString()).isPresent()) {
+                skipped++;
+                continue;
+            }
             importUser(root, u);
-            count++;
+            imported++;
         }
-        log.info("Перенесено пользователей из {}: {}", root.toAbsolutePath(), count);
+        log.info("Перенос старых данных из {}: перенесено пользователей {}, пропущено (почта уже есть) {}",
+                root.toAbsolutePath(), imported, skipped);
     }
 
     private void importUser(Path root, JsonNode u) throws Exception {
