@@ -39,8 +39,9 @@
 
 ## Стек
 
-Java 21, Spring Boot 4 (Web MVC, Security, Data JPA), Hibernate, PostgreSQL, миграции Flyway.
-Монолит: один процесс и одна база, классы разложены по пакетам по роли (контроллеры, сервисы, сущности и т. д.).
+Java 21, Spring Boot 4 (Web MVC, Security, Data JPA), Hibernate, PostgreSQL, миграции Flyway,
+Lombok, MapStruct (маппинг сущность ↔ DTO), QueryDSL (фильтры поиска).
+Maven-проект из двух модулей: `dto` — модели запросов и ответов, `app` — приложение.
 
 ## Запуск для разработки
 
@@ -49,8 +50,8 @@ Java 21, Spring Boot 4 (Web MVC, Security, Data JPA), Hibernate, PostgreSQL, м�
 ```bash
 cd pulsar
 docker compose up -d db       # PostgreSQL на localhost:5432, база и пользователь pulsar, пароль pulsar
-./mvnw verify                 # тесты и сборка target/pulsar-tax.jar
-java -jar target/pulsar-tax.jar
+./mvnw verify                 # тесты и сборка app/target/pulsar-tax.jar
+java -jar app/target/pulsar-tax.jar
 ```
 
 Без Docker установите PostgreSQL и создайте базу:
@@ -78,6 +79,9 @@ java -jar pulsar-tax.jar
 
 Или в Docker вместе с базой: `PULSAR_DB_PASSWORD=свой-пароль docker compose up -d` (см. `docker-compose.yml`).
 Проверка работоспособности для балансировщика: `GET /actuator/health`.
+
+База должна быть в кодировке UTF-8 с UTF-8-локалью (так по умолчанию в Docker-образе и в пакетах Linux):
+поиск по клиенту без учёта регистра опирается на `lower()` в PostgreSQL.
 
 Резервная копия: `pg_dump -Fc pulsar > pulsar-$(date +%F).dump`, восстановление — `pg_restore -d pulsar файл`.
 
@@ -129,34 +133,59 @@ java -jar pulsar-tax.jar
 Таблицы (`V1__init.sql`): `users`, `sessions` (только SHA-256 токена), `businesses` (профиль ИП),
 `incomes`, `expenses`, `invoices` и `invoice_items`, `tax_payments`, `import_profiles`, `fx_rates` (кэш курсов ЦБ).
 Пароли — PBKDF2-SHA256 с солью. Деньги — `numeric`, без потерь на округлении.
-Схему меняет только Flyway: новая миграция — новый файл `V2__что_меняется.sql`; Hibernate лишь проверяет,
-что сущности совпадают со схемой.
+Схему меняет только Flyway: новая миграция — новый файл `V3__что_меняется.sql`; Hibernate лишь проверяет,
+что сущности совпадают со схемой. У сущностей с `BaseEntity` есть `created_at` и `last_updated_at` (V2).
 
 ## Устройство
 
 ```
-src/main/java/am/pulsar/tax/
-  PulsarApplication.java  точка входа
-  controller/   REST API: вход и учётная запись, профиль, доходы и расходы, счета, налог, курсы, экспорт, календарь
-  service/      бизнес-операции и транзакции: учётные записи, профиль ИП, учёт, счета, налог
-  entity/       сущности JPA (таблицы базы) и перечисления
-  repository/   репозитории Spring Data JPA
-  domain/       чистые расчёты без базы: налоговые правила (TaxRules), сводка (Summary), сроки и напоминания
-                (Deadlines), CSV
-  client/       внешние API: курсы ЦБ РА с кэшем в базе, бот Telegram
-  security/     Spring Security, сессии (cookie и Bearer), пароли, CORS и защита от чужих сайтов
-  config/       настройки PULSAR_*, Jackson, фильтры
-  job/          рассылка напоминаний по расписанию, перенос данных старой версии при запуске
-  exception/    ApiException и ответы {"error": ...}
-  util/         разбор и проверка полей запроса, время Еревана
-src/main/resources/
-  application.yml         настройки
-  db/migration/           миграции Flyway (SQL); Java-миграции — в src/main/java/db/migration
-src/test/java/am/pulsar/tax/
-  RulesTest.java          налоги, сводка, сроки, CSV, разбор чисел и курсов
-  ApiTest.java            API целиком на настоящем PostgreSQL с заглушками ЦБ РА и Telegram
-  LegacyImportTest.java   перенос старых данных
+dto/src/main/java/am/pulsar/tax/dto/
+  BaseDto, *Dto      ответы API (IncomeDto, InvoiceDto, BusinessDto, UserDto…)
+  create/            создание: BaseCreateDto, IncomeCreateDto… (проверки Bean Validation)
+  patch/             частичное изменение: BasePatchDto, поля Optional (null — не менять, null в JSON — очистить)
+  filter/            поиск: BaseFilterDto (ids, _or_), SearchRequest (фильтр, сортировки, пагинация), SearchResponse
+  enums/, enums/sort перечисления и доступные сортировки
+  auth/, request/, error/   вход, прочие запросы, ErrorResponseDto {"error": ...}
+
+app/src/main/java/am/pulsar/tax/app/
+  controller/        REST API; AbstractCrudController — общие операции сущностей ИП
+  service/           AbstractReadOnlyService, AbstractCrudService и сервисы сущностей, вход, сводка
+  service/provider/  EntityProvider: создание и изменение сущности из DTO (MapStruct) с проверками
+  service/calculation/ налоговые правила (TaxRules), сводка (Summary), сроки и напоминания (Deadlines)
+  entity/            сущности JPA, BaseEntity (id, createdAt, lastUpdatedAt)
+  repository/        Spring Data JPA + QueryDSL
+  mapper/entity/     EntityMapper: сущность → DTO (MapStruct)
+  mapper/filter/     SearchMapper: фильтр → предикат QueryDSL, доступ только к записям своего ИП
+  integration/       ЦБ РА (курсы с кэшем), Telegram (бот, рассылка напоминаний)
+  config/            PulsarProperties, Jackson (числа и даты из полей ввода), веб; config/security — сессии, CORS
+  migration/         Java-миграции Flyway (R__FirstUser) и перенос данных старой версии
+  exception/         ApiException и наследники, ControllerExceptionHandler
+  utils/             время Еревана, пароли, CSV, текущий пользователь
+app/src/main/resources/
+  application.yml    настройки
+  db/migration/      SQL-миграции Flyway
+app/src/test/java/am/pulsar/tax/app/
+  RulesTest          налоги, сводка, сроки, CSV, разбор чисел и курсов
+  ApiTest            API целиком на временном PostgreSQL с заглушками ЦБ РА и Telegram
+  LegacyImportTest   перенос старых данных
 ```
+
+### Общие эндпоинты сущностей
+
+Доходы (`/api/incomes`), расходы (`/api/expenses`), счета (`/api/invoices`) и уплаты (`/api/payments`)
+наследуют `AbstractCrudController`, поэтому кроме эндпоинтов из таблицы ниже у каждой есть:
+
+| Метод | Путь | Описание |
+|---|---|---|
+| GET | `/{id}` | Запись по id |
+| POST | `/search` | Поиск: `{"filter": {...}, "sorts": [{"sortName": "DATE", "direction": "DESC"}], "pagination": {"pageNumber": 0, "pageSize": 20}}` → `{"content": [...], "totalElements": ...}` |
+| POST | `/count` | Количество по фильтру |
+| PATCH | (корень, например `/api/incomes`) | Частичное изменение: `{"id": 1, "description": "…"}` |
+
+Фильтры: `IncomeFilterDto` (year, dateFrom, dateTo, currencies, invoiceIds, importKeys, client), `ExpenseFilterDto`
+(year, dateFrom, dateTo, categories), `InvoiceFilterDto` (year, statuses, numbers, client), `TaxPaymentFilterDto`
+(years, quarters); во всех — `ids` и `_or_` (вложенные фильтры через ИЛИ). Видны только записи своего ИП.
+
 
 ### API
 

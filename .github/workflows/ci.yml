@@ -23,5 +23,5 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: pulsar-tax-jar
-          path: pulsar/target/pulsar-tax.jar
+          path: pulsar/app/target/pulsar-tax.jar
           retention-days: 7

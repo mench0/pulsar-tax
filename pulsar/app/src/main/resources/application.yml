@@ -1,0 +1,62 @@
+# Настройки Pulsar Tax. Все значения можно задать переменными окружения (README).
+server:
+  port: ${PULSAR_PORT:8080}
+  address: ${PULSAR_HOST:127.0.0.1}
+  shutdown: graceful
+  error:
+    whitelabel:
+      enabled: false
+
+spring:
+  application:
+    name: pulsar-tax
+  main:
+    banner-mode: off
+  threads:
+    virtual:
+      enabled: true
+  datasource:
+    # Внешний PostgreSQL. По умолчанию — локальная база для разработки (docker compose up -d db).
+    url: ${PULSAR_DB_URL:jdbc:postgresql://localhost:5432/pulsar}
+    username: ${PULSAR_DB_USER:pulsar}
+    password: ${PULSAR_DB_PASSWORD:pulsar}
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate   # схему меняет только Flyway; Hibernate проверяет, что сущности ей соответствуют
+    properties:
+      hibernate:
+        jdbc.time_zone: UTC
+  flyway:
+    # SQL-миграции и Java-миграции (R__FirstUser)
+    locations: classpath:db/migration,classpath:am/pulsar/tax/app/migration
+    placeholders:
+      # Первый пользователь (миграция R__FirstUser). Пусто — не создаётся.
+      first_user_email: ${PULSAR_FIRST_USER_EMAIL:}
+      first_user_password: ${PULSAR_FIRST_USER_PASSWORD:}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+  endpoint:
+    health:
+      probes:
+        enabled: true
+
+pulsar:
+  signup: ${PULSAR_SIGNUP:open}
+  secure-cookie: ${PULSAR_SECURE_COOKIE:false}
+  cookie-same-site: ${PULSAR_COOKIE_SAMESITE:Strict}
+  allowed-origins: ${PULSAR_ALLOWED_ORIGINS:}
+  telegram-token: ${PULSAR_TELEGRAM_TOKEN:}
+  telegram-api: https://api.telegram.org
+  cba-url: ${PULSAR_CBA_URL:https://api.cba.am/exchangerates.asmx}
+  # Путь к папке данных старой версии (users.json и users/*.json) — перенос в базу при запуске.
+  import-legacy: ${PULSAR_IMPORT_LEGACY:}
+
+logging:
+  level:
+    root: INFO
+    org.hibernate.orm.deprecation: WARN
