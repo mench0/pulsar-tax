@@ -1,5 +1,5 @@
 package am.pulsar.tax.app.config.security;import am.pulsar.tax.app.config.PulsarProperties;
-import am.pulsar.tax.app.service.AuthService;
+import am.pulsar.tax.app.config.SessionProperties;
 import jakarta.servlet.http.Cookie;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
@@ -16,9 +16,11 @@ public class SessionCookies {
     public static final String COOKIE = "pulsar_session";
 
     private final PulsarProperties props;
+    private final SessionProperties sessionProperties;
 
-    public SessionCookies(PulsarProperties props) {
+    public SessionCookies(PulsarProperties props, SessionProperties sessionProperties) {
         this.props = props;
+        this.sessionProperties = sessionProperties;
     }
 
     public static String bearer(HttpServletRequest req) {
@@ -38,7 +40,7 @@ public class SessionCookies {
     }
 
     public void set(HttpServletResponse res, String token) {
-        res.addHeader(HttpHeaders.SET_COOKIE, cookie(token, AuthService.SESSION_TTL.toSeconds()));
+        res.addHeader(HttpHeaders.SET_COOKIE, cookie(token, sessionProperties.ttl().toSeconds()));
     }
 
     public void clear(HttpServletResponse res) {

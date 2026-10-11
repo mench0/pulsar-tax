@@ -5,7 +5,6 @@ import am.pulsar.tax.app.entity.ImportProfile;
 import am.pulsar.tax.app.entity.Income;
 import am.pulsar.tax.app.entity.Invoice;
 import am.pulsar.tax.app.entity.InvoiceItem;
-import am.pulsar.tax.app.entity.Session;
 import am.pulsar.tax.app.entity.TaxPayment;
 import am.pulsar.tax.app.entity.User;
 import am.pulsar.tax.app.repository.BusinessRepository;
@@ -13,11 +12,11 @@ import am.pulsar.tax.app.repository.ExpenseRepository;
 import am.pulsar.tax.app.repository.ImportProfileRepository;
 import am.pulsar.tax.app.repository.IncomeRepository;
 import am.pulsar.tax.app.repository.InvoiceRepository;
-import am.pulsar.tax.app.repository.SessionRepository;
 import am.pulsar.tax.app.repository.TaxPaymentRepository;
 import am.pulsar.tax.app.repository.UserRepository;
 import am.pulsar.tax.app.service.BusinessService;
 import am.pulsar.tax.app.service.provider.BusinessProvider;
+import am.pulsar.tax.app.service.session.SessionStore;
 import am.pulsar.tax.app.utils.ClockUtils;
 import am.pulsar.tax.dto.enums.Currency;
 import am.pulsar.tax.dto.enums.ExpenseCategory;
@@ -47,8 +46,8 @@ import java.util.Map;
 
 /**
  * Перенос данных версии на файлах (users.json и users/{id}.json) в базу. Запускается, если задан
- * PULSAR_IMPORT_LEGACY и в базе ещё нет пользователей. Пароли и сессии переносятся как есть:
- * формат хэшей не изменился, поэтому заново входить не нужно.
+ * PULSAR_IMPORT_LEGACY и в базе ещё нет пользователей. Пароли переносятся как есть (формат хэшей не изменился);
+ * действующие сессии попадают в хранилище сессий и живут его TTL.
  */
 @Slf4j
 @Component
@@ -59,7 +58,7 @@ public class LegacyImport implements ApplicationRunner {
     PulsarProperties props;
     JsonMapper json;
     UserRepository userRepository;
-    SessionRepository sessionRepository;
+    SessionStore sessionStore;
     BusinessService businessService;
     BusinessProvider businessProvider;
     BusinessRepository businessRepository;
@@ -107,7 +106,7 @@ public class LegacyImport implements ApplicationRunner {
         for (Map.Entry<String, JsonNode> s : u.path("sessions").properties()) {
             Instant until = Instant.ofEpochSecond(s.getValue().asLong());
             if (until.isAfter(now)) {
-                sessionRepository.save(Session.builder().tokenHash(s.getKey()).userId(user.getId()).expiresAt(until).build());
+                sessionStore.save(s.getKey(), user.getId());
             }
         }
 
