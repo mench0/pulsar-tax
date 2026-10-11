@@ -13,15 +13,6 @@ create table users (
     created_at      timestamptz  not null default now()
 );
 
--- Токен сессии хранится только как SHA-256: украденная база не даёт войти.
-create table sessions (
-    token_hash  varchar(64) primary key,
-    user_id     bigint      not null references users (id) on delete cascade,
-    expires_at  timestamptz not null,
-    created_at  timestamptz not null default now()
-);
-create index sessions_user_idx on sessions (user_id);
-
 -- Предприниматель (профиль ИП). Пока один на пользователя; отдельная таблица — чтобы позже
 -- бухгалтер мог вести несколько ИП.
 create table businesses (

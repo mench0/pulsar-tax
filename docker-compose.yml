@@ -6,11 +6,11 @@ services:
     volumes:
       - postgres-data:/var/lib/postgresql/data
     ports:
-      - "127.0.0.1:5432:5432"
+      - 5432:5432
     environment:
       - POSTGRES_DB=pulsar
       - POSTGRES_USER=pulsar
-      - POSTGRES_PASSWORD=${PULSAR_DB_PASSWORD:-pulsar}
+      - POSTGRES_PASSWORD=pulsar
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U pulsar -d pulsar"]
       interval: 10s

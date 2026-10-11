@@ -32,8 +32,8 @@ spring:
     locations: classpath:db/migration,classpath:am/pulsar/tax/app/migration
     placeholders:
       # Первый пользователь (миграция R__FirstUser). Пусто — не создаётся.
-      first_user_email: ${PULSAR_FIRST_USER_EMAIL:}
-      first_user_password: ${PULSAR_FIRST_USER_PASSWORD:}
+      first_user_email: ${PULSAR_FIRST_USER_EMAIL:admin@gmail.com}
+      first_user_password: ${PULSAR_FIRST_USER_PASSWORD:12345678}
 
 management:
   endpoints:
