@@ -1,34 +1,20 @@
-# Разработка: только база — docker compose up -d db (API запускается из IDE или java -jar).
-# Сервер: API и база — docker compose up -d. Задайте свой пароль: PULSAR_DB_PASSWORD=... в окружении или в .env.
+# Инфраструктура для разработки (как в проекте test): docker compose up -d
+# API запускается отдельно: из IDE или java -jar app/target/pulsar-tax.jar.
 services:
-  db:
-    image: postgres:17
-    environment:
-      POSTGRES_DB: pulsar
-      POSTGRES_USER: pulsar
-      POSTGRES_PASSWORD: ${PULSAR_DB_PASSWORD:-pulsar}
+  postgres:
+    image: "postgres:17-alpine"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
     ports:
       - "127.0.0.1:5432:5432"
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U pulsar"]
-      interval: 5s
-      retries: 10
-
-  api:
-    build: .
-    depends_on:
-      db:
-        condition: service_healthy
     environment:
-      PULSAR_DB_URL: jdbc:postgresql://db:5432/pulsar
-      PULSAR_DB_USER: pulsar
-      PULSAR_DB_PASSWORD: ${PULSAR_DB_PASSWORD:-pulsar}
-      PULSAR_ALLOWED_ORIGINS: ${PULSAR_ALLOWED_ORIGINS:-http://localhost:5000}
-      # За HTTPS-прокси: PULSAR_SECURE_COOKIE: "1"
-    ports:
-      - "127.0.0.1:8080:8080"
-
+      - POSTGRES_DB=pulsar
+      - POSTGRES_USER=pulsar
+      - POSTGRES_PASSWORD=${PULSAR_DB_PASSWORD:-pulsar}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pulsar -d pulsar"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
 volumes:
-  pgdata:
+  postgres-data:

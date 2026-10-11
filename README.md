@@ -48,7 +48,7 @@ Maven-проект из двух модулей: `dto` — модели запр
 Нужны **Java 21+** и **PostgreSQL 14+** (Maven скачается сам через `mvnw`). Проще всего поднять базу в Docker:
 
 ```bash
-docker compose up -d db       # PostgreSQL на localhost:5432, база и пользователь pulsar, пароль pulsar
+docker compose up -d          # PostgreSQL на localhost:5432, база и пользователь pulsar, пароль pulsar
 ./mvnw verify                 # тесты и сборка app/target/pulsar-tax.jar
 java -jar app/target/pulsar-tax.jar
 ```
@@ -76,7 +76,15 @@ PULSAR_HOST=0.0.0.0 PULSAR_SECURE_COOKIE=1 PULSAR_ALLOWED_ORIGINS=https://app.pu
 java -jar pulsar-tax.jar
 ```
 
-Или в Docker вместе с базой: `PULSAR_DB_PASSWORD=свой-пароль docker compose up -d` (см. `docker-compose.yml`).
+Или в Docker: образ API собирается из `Dockerfile`, база — из `docker-compose.yml`
+(`PULSAR_DB_PASSWORD=свой-пароль docker compose up -d`):
+
+```bash
+docker build -t pulsar-tax-api .
+docker run -d --name pulsar-api --network host \
+  -e PULSAR_DB_URL=jdbc:postgresql://localhost:5432/pulsar -e PULSAR_DB_USER=pulsar -e PULSAR_DB_PASSWORD=свой-пароль \
+  -e PULSAR_HOST=127.0.0.1 -e PULSAR_SECURE_COOKIE=1 -e PULSAR_ALLOWED_ORIGINS=https://app.pulsar.am pulsar-tax-api
+```
 Проверка работоспособности для балансировщика: `GET /actuator/health`.
 
 База должна быть в кодировке UTF-8 с UTF-8-локалью (так по умолчанию в Docker-образе и в пакетах Linux):
