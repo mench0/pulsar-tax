@@ -1,6 +1,6 @@
 package am.pulsar.tax;
 
-import am.pulsar.tax.reminders.ReminderJob;
+import am.pulsar.tax.job.ReminderJob;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;

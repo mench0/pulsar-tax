@@ -1,6 +1,6 @@
 package am.pulsar.tax;
 
-import am.pulsar.tax.identity.Passwords;
+import am.pulsar.tax.security.Passwords;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalServerPort;
