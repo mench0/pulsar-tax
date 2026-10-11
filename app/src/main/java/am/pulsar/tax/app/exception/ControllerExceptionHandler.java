@@ -71,7 +71,14 @@ public class ControllerExceptionHandler {
         return error(400, "Неверный JSON в теле запроса");
     }
 
-    @ExceptionHandler({MissingServletRequestParameterException.class, MethodArgumentTypeMismatchException.class})
+    @ExceptionHandler
+    public ResponseEntity<ErrorResponseDto> handle(org.springframework.web.multipart.MaxUploadSizeExceededException e) {
+        return error(413, "Файл больше 10 МБ");
+    }
+
+    @ExceptionHandler({MissingServletRequestParameterException.class, MethodArgumentTypeMismatchException.class,
+            org.springframework.web.multipart.support.MissingServletRequestPartException.class,
+            org.springframework.web.multipart.MultipartException.class})
     public ResponseEntity<ErrorResponseDto> handleBadParameter(Exception e) {
         return error(400, "Неверный параметр запроса");
     }

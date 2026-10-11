@@ -58,4 +58,13 @@ public class Business extends BaseEntity {
 
     /** Ставка в процентах для ActivityType.CUSTOM. */
     BigDecimal customRate;
+
+    /** Сколько пользователь фактически отложил на налоги (по его словам). */
+    BigDecimal reserveBalance;
+
+    /** Остаток денег на счетах (по словам пользователя) — начальная точка прогноза. */
+    BigDecimal cashBalance;
+
+    /** На какую дату указаны остатки. */
+    java.time.LocalDate balancesAsOf;
 }

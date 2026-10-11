@@ -42,10 +42,15 @@ public class InvoiceController extends
         return mapper.toDtoList(invoiceService.getAll());
     }
 
-    /** Отметить оплату (по умолчанию сегодня): записывается доход на сумму счёта. */
+    /**
+     * Отметить оплату (по умолчанию сегодня): записывается доход на сумму счёта. С incomeId счёт закрывается уже
+     * учтённым доходом; если похожий доход уже есть, без newPayment=true ответ 409 — чтобы не учесть оплату дважды.
+     */
     @PostMapping("/{id}/paid")
-    public InvoiceDto markPaid(@PathVariable("id") Long id, @RequestParam(required = false) String date) {
-        return mapper.toDto(invoiceService.markPaid(id, RequestUtils.date(date)));
+    public InvoiceDto markPaid(@PathVariable("id") Long id, @RequestParam(required = false) String date,
+                               @RequestParam(required = false) Long incomeId,
+                               @RequestParam(required = false) Boolean newPayment) {
+        return mapper.toDto(invoiceService.markPaid(id, RequestUtils.date(date), incomeId, Boolean.TRUE.equals(newPayment)));
     }
 
     /** Номер официального электронного счёта из e-invoice.taxservice.am. */

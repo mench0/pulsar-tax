@@ -20,6 +20,11 @@ spring:
     url: ${PULSAR_DB_URL:jdbc:postgresql://localhost:5432/pulsar}
     username: ${PULSAR_DB_USER:pulsar}
     password: ${PULSAR_DB_PASSWORD:pulsar}
+  servlet:
+    multipart:
+      # Документы (счета, чеки) — до 10 МБ; DocumentService проверяет тип по содержимому.
+      max-file-size: 10MB
+      max-request-size: 11MB
   jpa:
     open-in-view: false
     hibernate:
@@ -30,6 +35,8 @@ spring:
   flyway:
     # SQL-миграции и Java-миграции (R__FirstUser)
     locations: classpath:db/migration,classpath:am/pulsar/tax/app/migration
+    # V3 (удаление таблицы sessions) убрана из проекта; базы, где она уже применена, не должны падать на проверке.
+    ignore-migration-patterns: "*:missing,*:future"
     placeholders:
       # Первый пользователь (миграция R__FirstUser). Пусто — не создаётся.
       first_user_email: ${PULSAR_FIRST_USER_EMAIL:admin@gmail.com}
@@ -55,6 +62,10 @@ pulsar:
   cba-url: ${PULSAR_CBA_URL:https://api.cba.am/exchangerates.asmx}
   # Путь к папке данных старой версии (users.json и users/*.json) — перенос в базу при запуске.
   import-legacy: ${PULSAR_IMPORT_LEGACY:}
+  ocr:
+    # Путь к tesseract для распознавания изображений документов (локально, без внешних сервисов).
+    # Пусто — изображения сохраняются, реквизиты вводятся вручную. PDF с текстом читаются всегда.
+    tesseract: ${PULSAR_OCR_TESSERACT:}
   session:
     # Время жизни сессии после входа.
     ttl: ${PULSAR_SESSION_TTL:1h}

@@ -52,6 +52,10 @@ final class ApiClient {
         return JSON.readTree(call(method, path, body, headers).body()).path("error").asString();
     }
 
+    int port() {
+        return port;
+    }
+
     ApiClient register(String email) throws Exception {
         assertEquals(201, status("POST", "/api/auth/register",
                 "{\"email\":\"" + email + "\",\"password\":\"пароль-для-теста\"}"));

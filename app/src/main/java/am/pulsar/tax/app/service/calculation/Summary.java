@@ -49,7 +49,9 @@ public final class Summary {
         BigDecimal totalDue = BigDecimal.ZERO;
         List<Map<String, Object>> quarters = new ArrayList<>();
         for (int q = 0; q < 4; q++) {
-            BigDecimal tax = TaxRules.tax(byQuarter[q], rate);
+            // Налог квартала — из налогового движка: те же правила по датам операций, что и в подробном расчёте.
+            BigDecimal tax = rate == null ? null : TaxEngine.calculate(profile, year, q + 1, yearIncomes, List.of(), List.of(), null)
+                    .totals().accrued();
             BigDecimal due = tax == null ? null : tax.subtract(paid[q + 1]).max(BigDecimal.ZERO);
             Map<String, Object> qm = new LinkedHashMap<>();
             qm.put("quarter", q + 1);
@@ -62,11 +64,12 @@ public final class Summary {
             quarters.add(qm);
             total = total.add(byQuarter[q]);
             totalPaid = totalPaid.add(paid[q + 1]);
-            if (totalTax != null) totalTax = totalTax.add(tax);
+            if (totalTax != null) totalTax = tax == null ? null : totalTax.add(tax);
             if (due != null) totalDue = totalDue.add(due);
         }
 
-        BigDecimal limit = TaxRules.forYear(year).threshold(profile.getRegime());
+        TaxRules.YearRules yearRules = TaxRules.forYear(year);
+        BigDecimal limit = yearRules == null ? null : yearRules.threshold(profile.getRegime());
         ThresholdStatus status = TaxRules.status(total, limit);
         boolean regimeAllowed = TaxRules.regimeAllowed(profile, year);
 
@@ -76,7 +79,8 @@ public final class Summary {
                     "activity", profile.getActivity(), "regime", profile.getRegime(), "year", year)));
         }
         if (profile.getRegime() == TaxRegime.GENERAL) warnings.add(notice("GENERAL_NOT_SUPPORTED", Map.of()));
-        if (turnover && rate == null && regimeAllowed) warnings.add(notice("RATE_MISSING", Map.of()));
+        if (yearRules == null) warnings.add(notice("RULES_MISSING_FOR_PERIOD", Map.of("firstKnownDate", TaxRules.firstKnownDate())));
+        if (turnover && rate == null && regimeAllowed && yearRules != null) warnings.add(notice("RATE_MISSING", Map.of()));
         if (status == ThresholdStatus.WARNING) warnings.add(notice("THRESHOLD_WARNING", Map.of()));
         if (status == ThresholdStatus.EXCEEDED) warnings.add(notice("THRESHOLD_EXCEEDED", Map.of()));
 

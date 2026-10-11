@@ -32,6 +32,8 @@ class ApiTest {
     static void props(DynamicPropertyRegistry r) throws Exception {
         r.add("pulsar.cba-url", Stubs::cbaUrl);
         r.add("pulsar.telegram-token", () -> "TOKEN");
+        // Распознавание изображений проверяется, если tesseract установлен на машине.
+        r.add("pulsar.ocr.tesseract", () -> new java.io.File("/usr/bin/tesseract").canExecute() ? "/usr/bin/tesseract" : "");
         r.add("pulsar.telegram-api", Stubs::telegramUrl);
         r.add("pulsar.allowed-origins", () -> "https://app.pulsar.am/");
         r.add("spring.flyway.placeholders.first_user_email", () -> " Admin@Example.am ");
@@ -195,6 +197,395 @@ class ApiTest {
         assertEquals("2026-04-20", summary.path("quarters").get(0).path("dueDate").asString());
         assertEquals(204, c.status("DELETE", "/api/payments/" + payment.path("id").asLong(), null));
         assertEquals(400, c.status("GET", "/api/summary?year=19", null));
+    }
+
+    @Test
+    void taxCalculationAndSnapshots() throws Exception {
+        ApiClient c = client().register("calc@example.am");
+        c.json("PUT", "/api/profile", "{\"regime\":\"TURNOVER\",\"activity\":\"TRADE\"}");
+        long id = c.json("POST", "/api/incomes", "{\"date\":\"2026-02-10\",\"amount\":100000}").path("id").asLong();
+        c.json("POST", "/api/expenses", "{\"date\":\"2026-02-11\",\"amount\":50000}");
+        JsonNode calc = c.json("GET", "/api/tax/calculation?year=2026&quarter=1", null);
+        assertEquals(10000, calc.path("totals").path("accrued").asInt());
+        assertEquals(100000, calc.path("totals").path("taxBase").asInt());
+        assertEquals(50000, calc.path("totals").path("expenses").asInt());
+        assertEquals("TURNOVER_RATE.TRADE", calc.path("rules").get(0).path("code").asString());
+        assertEquals("OFFICIAL_SUMMARY", calc.path("rules").get(0).path("basis").path("status").asString());
+        assertEquals(400, c.status("GET", "/api/tax/calculation?year=2026&quarter=5", null));
+
+        long snap = c.json("POST", "/api/tax/snapshots", "{\"year\":2026,\"quarter\":1,\"reason\":\"до правки\"}").path("id").asLong();
+        assertFalse(c.json("GET", "/api/tax/snapshots/" + snap + "/diff", null).path("changed").asBoolean());
+        c.json("PATCH", "/api/incomes", "{\"id\":" + id + ",\"amount\":120000}");
+        JsonNode diff = c.json("GET", "/api/tax/snapshots/" + snap + "/diff", null);
+        assertTrue(diff.path("changed").asBoolean());
+        assertEquals("CHANGED", diff.path("lines").get(0).path("kind").asString());
+        assertEquals(2000, diff.path("totals").path("accrued").get(2).asInt());
+        assertEquals(1, c.json("GET", "/api/tax/snapshots?year=2026", null).size());
+        assertEquals(10000, c.json("GET", "/api/tax/snapshots/" + snap, null).path("totals").path("accrued").asInt());
+        // Чужой снимок недоступен.
+        assertEquals(404, client().register("calc2@example.am").status("GET", "/api/tax/snapshots/" + snap + "/diff", null));
+    }
+
+    static String statement(String account, String rows, String overrides) {
+        return "{\"fileName\":\"may.csv\",\"fileSha256\":\"abc\",\"account\":\"" + account + "\","
+                + "\"header\":[\"Дата\",\"Сумма\",\"Валюта\",\"Контрагент\",\"Назначение\"],"
+                + "\"mapping\":{\"date\":0,\"dateFormat\":\"dd.mm.yyyy\",\"amount\":1,\"currencyCol\":2,\"currency\":\"AMD\","
+                + "\"counterparty\":3,\"desc\":4},\"rows\":[" + rows + "]" + (overrides == null ? "" : ",\"overrides\":" + overrides) + "}";
+    }
+
+    @Test
+    void bankStatementPreviewCommitAndReview() throws Exception {
+        ApiClient c = client().register("bank@example.am");
+        String rows = "[\"01.05.2026\",\"150 000\",\"AMD\",\"ООО Ромашка\",\"Оплата по счету 7\"],"
+                + "[\"02.05.2026\",\"-500\",\"AMD\",\"\",\"Комиссия за перевод\"],"
+                + "[\"03.05.2026\",\"-500\",\"AMD\",\"\",\"Комиссия за перевод\"],"
+                + "[\"31.02.2026\",\"100\",\"AMD\",\"\",\"x\"],"
+                + "[\"04.05.2026\",\"100,5\",\"USD\",\"Client LLC\",\"for services\"],"
+                + "[\"05.05.2026\",\"1\",\"XYZ\",\"\",\"\"],"
+                + "[\"06.05.2026\",\"-200000\",\"AMD\",\"\",\"Перевод между своими счетами\"]";
+        JsonNode preview = c.json("POST", "/api/bank/statements/preview", statement("Ameriabank AMD", rows, null));
+        assertEquals(7, preview.path("total").asInt());
+        assertEquals(2, preview.path("errors").asInt());
+        JsonNode r = preview.path("rows");
+        assertEquals("INCOME", r.get(0).path("suggestedKind").asString());
+        assertEquals("BANK_FEE", r.get(1).path("suggestedKind").asString());
+        assertEquals("DATE_INVALID", r.get(3).path("errors").get(0).asString());
+        assertEquals("CBA", r.get(4).path("rateSource").asString());
+        assertEquals("38943.75", r.get(4).path("amountAmd").asString());
+        assertEquals("CURRENCY_UNSUPPORTED", r.get(5).path("errors").get(0).asString());
+        assertEquals("OWN_TRANSFER", r.get(6).path("suggestedKind").asString());
+        assertEquals(0, c.json("GET", "/api/bank/transactions", null).size()); // просмотр ничего не сохраняет
+
+        // Сохраняем: доход подтверждаем сразу, вторую комиссию пропускаем.
+        JsonNode saved = c.json("POST", "/api/bank/statements", statement("Ameriabank AMD", rows,
+                "[{\"row\":1,\"kind\":\"INCOME\"},{\"row\":3,\"skip\":true}]"));
+        assertEquals(4, saved.path("added").asInt());
+        assertEquals(2, saved.path("errors").asInt());
+        assertEquals(1, saved.path("skipped").asInt());
+        assertEquals(1, saved.path("confirmed").asInt());
+        assertEquals(1, c.json("GET", "/api/incomes?year=2026", null).size());
+
+        // Повторная загрузка того же файла — только дубли.
+        JsonNode again = c.json("POST", "/api/bank/statements/preview", statement("Ameriabank AMD", rows, null));
+        assertEquals(4, again.path("duplicates").asInt());
+        assertTrue(again.path("sameFileImportId").isNumber());
+        // Пропущенная в прошлый раз строка не сохранялась — её снова можно добавить или снова пропустить.
+        assertFalse(again.path("rows").get(2).path("duplicate").asBoolean());
+        assertEquals(0, c.json("POST", "/api/bank/statements", statement("Ameriabank AMD", rows,
+                "[{\"row\":3,\"skip\":true}]")).path("added").asInt());
+
+        // Перевод с другого своего счёта на ту же сумму распознаётся как пара.
+        c.json("POST", "/api/bank/statements", statement("Ameriabank USD",
+                "[\"06.05.2026\",\"200000\",\"AMD\",\"\",\"Пополнение\"]", null));
+        JsonNode review = c.json("GET", "/api/bank/transactions?status=NEEDS_REVIEW", null);
+        JsonNode incoming = null;
+        for (JsonNode t : review) if (t.path("amount").asInt() == 200000) incoming = t;
+        assertNotNull(incoming);
+        assertEquals("OWN_TRANSFER", incoming.path("suggestedKind").asString());
+        assertTrue(incoming.path("reasons").toString().contains("MATCHES_OTHER_ACCOUNT"));
+
+        // Подтверждаем уверенные подсказки: комиссия и исходящий перевод по ключевым словам. Входящий перевод,
+        // найденный только по встречной сумме (0.8), и доход в валюте (0.8) остаются на проверку.
+        assertEquals(2, c.json("POST", "/api/bank/transactions/confirm-confident", "{}").path("confirmed").asInt());
+        assertEquals(1, c.json("GET", "/api/expenses?year=2026", null).size()); // комиссия стала расходом
+        long usd = 0;
+        for (JsonNode t : c.json("GET", "/api/bank/transactions?status=NEEDS_REVIEW", null)) usd = t.path("id").asLong();
+        assertEquals("Это поступление: такой тип возможен только для списания",
+                c.error("POST", "/api/bank/transactions/" + usd + "/review", "{\"kind\":\"BANK_FEE\"}"));
+        JsonNode confirmed = c.json("POST", "/api/bank/transactions/" + usd + "/review", "{\"kind\":\"INCOME\"}");
+        assertEquals("CONFIRMED", confirmed.path("status").asString());
+        JsonNode income = c.json("GET", "/api/incomes/" + confirmed.path("incomeId").asLong(), null);
+        assertEquals("38943.75", income.path("amount").asString());
+        assertEquals("USD", income.path("currency").asString());
+        // Передумали: операция — возврат. Доход удаляется.
+        c.json("POST", "/api/bank/transactions/" + usd + "/review", "{\"kind\":\"REFUND_RECEIVED\"}");
+        assertEquals(404, c.status("GET", "/api/incomes/" + confirmed.path("incomeId").asLong(), null));
+
+        // Удалили доход вручную — операция возвращается в очередь проверки.
+        long firstIncome = c.json("GET", "/api/incomes?year=2026", null).get(0).path("id").asLong();
+        assertEquals(204, c.status("DELETE", "/api/incomes/" + firstIncome, null));
+        boolean back = false;
+        for (JsonNode t : c.json("GET", "/api/bank/transactions?status=NEEDS_REVIEW", null)) back |= t.path("amount").asInt() == 150000;
+        assertTrue(back);
+
+        // История решений: тот же контрагент в новой выписке получает подсказку из истории.
+        long romashka = 0;
+        for (JsonNode t : c.json("GET", "/api/bank/transactions?status=NEEDS_REVIEW", null)) {
+            if (t.path("amount").asInt() == 150000) romashka = t.path("id").asLong();
+        }
+        c.json("POST", "/api/bank/transactions/" + romashka + "/review", "{\"kind\":\"INCOME\"}");
+        JsonNode next = c.json("POST", "/api/bank/statements/preview", statement("Ameriabank AMD",
+                "[\"10.06.2026\",\"90000\",\"AMD\",\"ООО Ромашка\",\"аванс\"]", null));
+        assertTrue(next.path("rows").get(0).path("reasons").toString().contains("USER_HISTORY"));
+
+        assertEquals(1, c.json("GET", "/api/bank/statements", null).get(0).path("rowsAdded").asInt());
+        assertEquals(400, c.status("POST", "/api/bank/statements/preview", "{\"rows\":[]}"));
+        assertEquals(404, client().register("bank2@example.am").status("POST", "/api/bank/transactions/" + usd + "/review", "{\"ignore\":true}"));
+    }
+
+    /** Строка, загруженная прежним импортом доходов (incomes.import_key), в новой выписке — дубль. */
+    @Test
+    void bankStatementRecognizesLegacyImport() throws Exception {
+        ApiClient c = client().register("bank-legacy@example.am");
+        String key = am.pulsar.tax.app.service.bank.StatementParser.legacyKey(
+                java.util.List.of("01.05.2026", "1000", "AMD", "А", "оплата"));
+        c.json("POST", "/api/incomes/import", "{\"items\":[{\"date\":\"2026-05-01\",\"amount\":1000,\"importKey\":\"" + key + "\"}]}");
+        JsonNode p = c.json("POST", "/api/bank/statements/preview", statement("",
+                "[\"01.05.2026\",\"1000\",\"AMD\",\"А\",\"оплата\"],[\"01.05.2026\",\"2000\",\"AMD\",\"Б\",\"оплата\"]", null));
+        assertEquals("INCOME_IMPORT", p.path("rows").get(0).path("duplicateOf").asString());
+        assertFalse(p.path("rows").get(1).path("duplicate").asBoolean());
+        // Доход той же даты и суммы, введённый вручную, — предупреждение о возможном дубле.
+        c.json("POST", "/api/incomes", "{\"date\":\"2026-05-01\",\"amount\":2000}");
+        JsonNode p2 = c.json("POST", "/api/bank/statements/preview", statement("",
+                "[\"01.05.2026\",\"2000\",\"AMD\",\"Б\",\"оплата\"]", null));
+        assertEquals("POSSIBLE_MANUAL_DUPLICATE", p2.path("rows").get(0).path("warnings").get(0).asString());
+    }
+
+    @Test
+    void reportReadinessPrepareAndManualFiling() throws Exception {
+        ApiClient c = client().register("report@example.am");
+        c.json("PUT", "/api/profile", "{\"regime\":\"TURNOVER\",\"activity\":\"TRADE\",\"tin\":\"12345678\"}");
+        long income = c.json("POST", "/api/incomes", "{\"date\":\"2026-04-10\",\"amount\":300000}").path("id").asLong();
+        c.json("POST", "/api/bank/statements", statement("",
+                "[\"12.05.2026\",\"-1000\",\"AMD\",\"\",\"что-то\"]", null));
+
+        JsonNode r = c.json("GET", "/api/reports/readiness?year=2026&quarter=2", null);
+        assertEquals("TURNOVER_QUARTERLY", r.path("type").asString());
+        assertFalse(r.path("ready").asBoolean());
+        assertTrue(r.path("checks").toString().contains("UNREVIEWED_TRANSACTIONS"));
+        assertEquals("2026-07-20", r.path("deadline").asString());
+        assertEquals(1, r.path("sources").path("manualIncomes").asInt());
+        assertTrue(r.path("instructions").toString().contains("PAY_TAX"));
+        assertTrue(c.error("POST", "/api/reports", "{\"year\":2026,\"quarter\":2}").contains("UNREVIEWED_TRANSACTIONS"));
+
+        long tx = c.json("GET", "/api/bank/transactions?status=NEEDS_REVIEW", null).get(0).path("id").asLong();
+        c.json("POST", "/api/bank/transactions/" + tx + "/review", "{\"kind\":\"EXPENSE\"}");
+        r = c.json("GET", "/api/reports/readiness?year=2026&quarter=2", null);
+        assertTrue(r.path("ready").asBoolean());
+        assertTrue(r.path("checks").toString().contains("MONTHS_WITHOUT_BANK_DATA")); // апрель и июнь без выписки
+        assertTrue(r.path("checks").toString().contains("DEADLINE_PASSED"));
+        assertTrue(c.error("POST", "/api/reports", "{\"year\":2026,\"quarter\":2}").startsWith("Подтвердите предупреждения"));
+
+        JsonNode v1 = c.json("POST", "/api/reports", "{\"year\":2026,\"quarter\":2,\"acceptWarnings\":true}");
+        assertEquals("PREPARED", v1.path("status").asString());
+        assertEquals(30000, v1.path("accrued").asInt());
+        long id1 = v1.path("id").asLong();
+        assertFalse(c.json("GET", "/api/reports/" + id1, null).path("stale").asBoolean());
+        String csv = c.call("GET", "/api/reports/" + id1 + "/export.csv", null).body();
+        assertTrue(csv.contains("turnover_amd;300000"));
+        assertTrue(csv.contains("tax_accrued_amd;30000"));
+
+        // Отметку о подаче ставит пользователь; дата в будущем недопустима.
+        assertEquals(400, c.status("POST", "/api/reports/" + id1 + "/filed", "{\"filedOn\":\"2099-01-01\"}"));
+        JsonNode filed = c.json("POST", "/api/reports/" + id1 + "/filed", "{\"filedOn\":\"2026-07-15\",\"reference\":\"№ 123\"}");
+        assertEquals("FILED_MANUALLY", filed.path("status").asString());
+
+        // Данные изменились после подготовки — отчёт устарел, видно, что именно поменялось.
+        c.json("PATCH", "/api/incomes", "{\"id\":" + income + ",\"amount\":310000}");
+        JsonNode stale = c.json("GET", "/api/reports/" + id1, null);
+        assertTrue(stale.path("stale").asBoolean());
+        assertEquals(1000, stale.path("changes").path("totals").path("accrued").get(2).asInt());
+        JsonNode v2 = c.json("POST", "/api/reports", "{\"year\":2026,\"quarter\":2,\"acceptWarnings\":true}");
+        assertEquals(2, v2.path("version").asInt());
+        JsonNode list = c.json("GET", "/api/reports?year=2026", null);
+        assertEquals("PREPARED", list.get(0).path("status").asString());
+        assertEquals("FILED_MANUALLY", list.get(1).path("status").asString()); // поданная версия не перезаписывается
+        assertTrue(c.json("GET", "/api/reports/readiness?year=2026&quarter=2", null).path("checks").toString().contains("ALREADY_FILED"));
+
+        // Микробизнес — годовой отчёт; квартал не нужен.
+        ApiClient m = client().register("report-micro@example.am");
+        assertEquals("MICRO_ANNUAL", m.json("GET", "/api/reports/readiness?year=2026", null).path("type").asString());
+        assertEquals(400, c.status("GET", "/api/reports/readiness?year=2026", null)); // для оборота нужен квартал
+        assertEquals(404, m.status("GET", "/api/reports/" + id1, null));
+    }
+
+    static String upload(ApiClient c, String name, byte[] content, int expected) throws Exception {
+        String boundary = "pulsar" + System.nanoTime();
+        java.io.ByteArrayOutputStream body = new java.io.ByteArrayOutputStream();
+        body.write(("--" + boundary + "\r\nContent-Disposition: form-data; name=\"file\"; filename=\"" + name
+                + "\"\r\nContent-Type: application/octet-stream\r\n\r\n").getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        body.write(content);
+        body.write(("\r\n--" + boundary + "--\r\n").getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        java.net.http.HttpRequest.Builder b = java.net.http.HttpRequest.newBuilder(java.net.URI.create("http://127.0.0.1:" + c.port() + "/api/documents"))
+                .header("Content-Type", "multipart/form-data; boundary=" + boundary)
+                .header("Cookie", c.cookie)
+                .POST(java.net.http.HttpRequest.BodyPublishers.ofByteArray(body.toByteArray()));
+        HttpResponse<String> r = java.net.http.HttpClient.newHttpClient().send(b.build(), HttpResponse.BodyHandlers.ofString());
+        assertEquals(expected, r.statusCode(), r.body());
+        return r.body();
+    }
+
+    static byte[] pdf(String... lines) throws Exception {
+        try (org.apache.pdfbox.pdmodel.PDDocument doc = new org.apache.pdfbox.pdmodel.PDDocument()) {
+            org.apache.pdfbox.pdmodel.PDPage page = new org.apache.pdfbox.pdmodel.PDPage();
+            doc.addPage(page);
+            try (org.apache.pdfbox.pdmodel.PDPageContentStream cs = new org.apache.pdfbox.pdmodel.PDPageContentStream(doc, page)) {
+                cs.beginText();
+                cs.setFont(new org.apache.pdfbox.pdmodel.font.PDType1Font(org.apache.pdfbox.pdmodel.font.Standard14Fonts.FontName.HELVETICA), 12);
+                cs.newLineAtOffset(50, 700);
+                for (String l : lines) {
+                    cs.showText(l);
+                    cs.newLineAtOffset(0, -18);
+                }
+                cs.endText();
+            }
+            java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+            doc.save(out);
+            return out.toByteArray();
+        }
+    }
+
+    static byte[] png(String... lines) throws Exception {
+        java.awt.image.BufferedImage img = new java.awt.image.BufferedImage(900, 60 + 50 * lines.length, java.awt.image.BufferedImage.TYPE_INT_RGB);
+        java.awt.Graphics2D g = img.createGraphics();
+        g.setColor(java.awt.Color.WHITE);
+        g.fillRect(0, 0, img.getWidth(), img.getHeight());
+        g.setColor(java.awt.Color.BLACK);
+        g.setRenderingHint(java.awt.RenderingHints.KEY_TEXT_ANTIALIASING, java.awt.RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
+        g.setFont(new java.awt.Font(java.awt.Font.SANS_SERIF, java.awt.Font.PLAIN, 32));
+        for (int i = 0; i < lines.length; i++) g.drawString(lines[i], 30, 60 + 50 * i);
+        g.dispose();
+        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+        javax.imageio.ImageIO.write(img, "png", out);
+        return out.toByteArray();
+    }
+
+    @Test
+    void documentsRecognitionConfirmationAndLinks() throws Exception {
+        ApiClient c = client().register("docs@example.am");
+        byte[] hosting = pdf("Hosting LLC  TIN 01234567", "Invoice No. H-2026-05 Date: 2026-05-03", "Total due: 12,500.00 AMD");
+        JsonNode d = ApiClient.JSON.readTree(upload(c, "hosting.pdf", hosting, 201));
+        assertEquals("Hosting LLC", d.path("extracted").path("counterparty").path("value").asString());
+        assertEquals("TEXT_LAYER", d.path("extraction").asString());
+        assertEquals("NEEDS_REVIEW", d.path("status").asString());
+        assertEquals("H-2026-05", d.path("extracted").path("number").path("value").asString());
+        assertEquals(0, new java.math.BigDecimal("12500").compareTo(d.path("extracted").path("amount").path("value").decimalValue()));
+        assertEquals("01234567", d.path("extracted").path("counterpartyTin").path("value").asString());
+        // Пока не подтверждено — подтверждённых значений нет.
+        assertEquals("", d.path("number").asString());
+        assertTrue(d.path("amount").isNull());
+        long id = d.path("id").asLong();
+
+        // Тот же файл повторно — 409; не PDF/PNG/JPEG — 400 (тип определяется по содержимому, не по имени).
+        upload(c, "again.pdf", hosting, 409);
+        upload(c, "evil.pdf", "<script>alert(1)</script>".getBytes(), 400);
+
+        // Банковская операция на ту же сумму уже стала расходом — документ привязывается к нему, второй расход не создаётся.
+        c.json("POST", "/api/bank/statements", statement("", "[\"05.05.2026\",\"-12500\",\"AMD\",\"Hosting LLC\",\"hosting\"]",
+                "[{\"row\":1,\"kind\":\"EXPENSE\"}]"));
+        JsonNode match = c.json("GET", "/api/documents/" + id, null).path("matches").get(0);
+        assertEquals(2, match.path("daysFromDocument").asInt());
+        JsonNode confirmed = c.json("POST", "/api/documents/" + id + "/confirm",
+                "{\"docType\":\"SUPPLIER_INVOICE\",\"number\":\"H-2026-05\",\"date\":\"2026-05-03\",\"currency\":\"AMD\","
+                        + "\"amount\":12500,\"counterparty\":\"Hosting LLC\",\"bankTransactionId\":" + match.path("bankTransactionId").asLong()
+                        + ",\"createExpense\":true}");
+        assertEquals("CONFIRMED", confirmed.path("status").asString());
+        assertEquals(match.path("expenseId").asLong(), confirmed.path("expenseId").asLong());
+        assertEquals(1, c.json("GET", "/api/expenses?year=2026", null).size());
+
+        HttpResponse<String> file = c.call("GET", "/api/documents/" + id + "/file", null);
+        assertEquals("nosniff", file.headers().firstValue("X-Content-Type-Options").orElse(""));
+        assertTrue(file.headers().firstValue("Content-Disposition").orElse("").startsWith("attachment"));
+        assertEquals(404, client().register("docs2@example.am").status("GET", "/api/documents/" + id + "/file", null));
+
+        // Изображение: распознаётся локальным tesseract, если он установлен; иначе честно «распознавание недоступно».
+        JsonNode img = ApiClient.JSON.readTree(upload(c, "receipt.png", png("RECEIPT No 4471", "Date 14.06.2026", "TOTAL 3,200.00 AMD"), 201));
+        if (new java.io.File("/usr/bin/tesseract").canExecute()) {
+            assertEquals("OCR", img.path("extraction").asString());
+            assertEquals(0, new java.math.BigDecimal("3200").compareTo(img.path("extracted").path("amount").path("value").decimalValue()), img.toString());
+        } else {
+            assertEquals("OCR_UNAVAILABLE", img.path("extraction").asString());
+        }
+        assertEquals(2, c.json("GET", "/api/documents", null).size());
+        assertEquals(204, c.status("DELETE", "/api/documents/" + img.path("id").asLong(), null));
+    }
+
+    @Test
+    void reconciliationPartialPaymentsAndNoDoubleIncome() throws Exception {
+        ApiClient c = client().register("recon@example.am");
+        JsonNode inv = c.json("POST", "/api/invoices",
+                "{\"client\":\"ООО Ромашка\",\"date\":\"2026-04-01\",\"dueDate\":\"2026-04-30\",\"items\":[{\"name\":\"Работа\",\"quantity\":1,\"price\":100000}]}");
+        long invoice = inv.path("id").asLong();
+        String number = inv.path("number").asString();
+        // Две оплаты из выписки: 60 000 и 40 000 с номером счёта в назначении.
+        c.json("POST", "/api/bank/statements", statement("",
+                "[\"05.04.2026\",\"60000\",\"AMD\",\"ООО Ромашка\",\"Оплата по счету " + number + "\"],"
+                        + "[\"20.04.2026\",\"40000\",\"AMD\",\"ООО Ромашка\",\"Оплата по счету " + number + " остаток\"]",
+                "[{\"row\":1,\"kind\":\"INCOME\"},{\"row\":2,\"kind\":\"INCOME\"}]"));
+
+        JsonNode o = c.json("GET", "/api/reconciliation", null);
+        assertEquals("OPEN", o.path("invoices").get(0).path("state").asString());
+        assertTrue(o.path("invoices").get(0).path("overdue").asBoolean());
+        assertEquals(100000, o.path("overdue").asInt());
+        assertEquals(2, o.path("unmatchedIncomes").size());
+        JsonNode sg = o.path("suggestions").get(0);
+        assertTrue(sg.path("reasons").toString().contains("NUMBER_IN_DESCRIPTION"));
+
+        // «Счёт оплачен» без связи с поступлениями отклоняется: оплата уже есть в доходах.
+        long first = o.path("unmatchedIncomes").get(0).path("id").asLong();
+        long second = o.path("unmatchedIncomes").get(1).path("id").asLong();
+        c.json("POST", "/api/reconciliation/allocations", "{\"invoiceId\":" + invoice + ",\"incomeId\":" + first + "}");
+        JsonNode partial = c.json("GET", "/api/reconciliation", null).path("invoices").get(0);
+        assertEquals("PARTIAL", partial.path("state").asString());
+        assertEquals(40000, partial.path("balance").asInt());
+        assertEquals(409, c.status("POST", "/api/invoices/" + invoice + "/paid?date=2026-04-21", null));
+        // Связываем второе поступление через «Счёт оплачен» — новый доход не создаётся.
+        assertEquals("PAID", c.json("POST", "/api/invoices/" + invoice + "/paid?incomeId=" + second, null).path("status").asString());
+        assertEquals(2, c.json("GET", "/api/incomes?year=2026", null).size());
+        JsonNode paid = c.json("GET", "/api/reconciliation", null);
+        assertEquals("PAID", paid.path("invoices").get(0).path("state").asString());
+        assertEquals(0, paid.path("unmatchedIncomes").size());
+        assertEquals(0, paid.path("receivable").asInt());
+
+        // Один доход нельзя распределить дважды сверх его суммы.
+        JsonNode inv2 = c.json("POST", "/api/invoices", "{\"client\":\"Б\",\"date\":\"2026-04-02\",\"items\":[{\"name\":\"x\",\"quantity\":1,\"price\":5}]}");
+        assertEquals("Доход уже полностью распределён по счетам",
+                c.error("POST", "/api/reconciliation/allocations", "{\"invoiceId\":" + inv2.path("id").asLong() + ",\"incomeId\":" + first + "}"));
+
+        // Отмена сопоставления возвращает счёт в частично оплаченные; удаление дохода — тоже.
+        long allocation = paid.path("invoices").get(0).path("payments").get(1).path("id").asLong();
+        assertEquals(204, c.status("DELETE", "/api/reconciliation/allocations/" + allocation, null));
+        assertEquals("SENT", c.json("GET", "/api/invoices/" + invoice, null).path("status").asString());
+        assertEquals(204, c.status("DELETE", "/api/incomes/" + first, null));
+        assertEquals("OPEN", c.json("GET", "/api/reconciliation", null).path("invoices").get(0).path("state").asString());
+
+        // Без похожего поступления «Счёт оплачен» по-прежнему записывает доход.
+        long inv2id = inv2.path("id").asLong();
+        assertEquals("PAID", c.json("POST", "/api/invoices/" + inv2id + "/paid?date=2026-04-03", null).path("status").asString());
+    }
+
+    @Test
+    void reserveAndForecast() throws Exception {
+        ApiClient c = client().register("plan@example.am");
+        c.json("PUT", "/api/profile", "{\"regime\":\"TURNOVER\",\"activity\":\"TRADE\"}");
+        c.json("POST", "/api/incomes", "{\"date\":\"2026-07-10\",\"amount\":500000}"); // 3 кв.: 50 000 налога
+        c.json("POST", "/api/payments", "{\"year\":2026,\"quarter\":3,\"date\":\"2026-10-05\",\"amount\":20000}");
+        c.json("POST", "/api/invoices", "{\"client\":\"А\",\"date\":\"2026-10-01\",\"dueDate\":\"2026-11-20\","
+                + "\"items\":[{\"name\":\"x\",\"quantity\":1,\"price\":100000}]}");
+
+        JsonNode r = c.json("GET", "/api/planning/reserve", null);
+        JsonNode q3 = null;
+        for (JsonNode o : r.path("obligations")) if (o.path("year").asInt() == 2026 && o.path("quarter").asInt() == 3) q3 = o;
+        assertNotNull(q3);
+        assertEquals(50000, q3.path("accrued").asInt());
+        assertEquals(20000, q3.path("paid").asInt());
+        assertEquals(30000, q3.path("due").asInt());
+        assertEquals(30000, r.path("accruedUnpaid").asInt());
+        assertEquals(10000, r.path("expectedOnReceivables").asInt()); // оценка: 10% от неоплаченного счёта
+        assertEquals(40000, r.path("recommended").asInt());
+        assertTrue(r.path("gap").isNull());
+        assertTrue(r.path("notes").toString().contains("ACTUAL_RESERVE_UNKNOWN"));
+
+        assertEquals(400, c.status("PUT", "/api/planning/balances", "{\"reserveBalance\":-1}"));
+        c.json("PUT", "/api/planning/balances", "{\"reserveBalance\":25000,\"cashBalance\":100000}");
+        r = c.json("GET", "/api/planning/reserve", null);
+        assertEquals(15000, r.path("gap").asInt()); // не хватает 15 000
+
+        JsonNode f = c.json("GET", "/api/planning/forecast?months=3", null);
+        assertEquals(3, f.path("projection").size());
+        assertEquals(100000, f.path("startingCash").asInt());
+        assertTrue(f.path("assumptions").toString().contains("RECEIVABLES_PAID_ON_DUE_DATE"));
+        assertEquals(400, c.status("GET", "/api/planning/forecast?months=40", null));
     }
 
     @Test

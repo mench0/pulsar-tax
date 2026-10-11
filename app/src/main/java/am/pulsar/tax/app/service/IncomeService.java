@@ -39,16 +39,22 @@ public class IncomeService extends AbstractCrudService<Income, IncomeCreateDto, 
     IncomeRepository incomeRepository;
     InvoiceRepository invoiceRepository;
     Validator validator;
+    BankService bankService;
+    ReconciliationService reconciliationService;
 
     public IncomeService(IncomeProvider entityProvider,
                          IncomeRepository repository,
                          IncomeSearchMapper searchMapper,
                          InvoiceRepository invoiceRepository,
-                         Validator validator) {
+                         Validator validator,
+                         BankService bankService,
+                         ReconciliationService reconciliationService) {
         super(Income.class, entityProvider, repository, repository, searchMapper);
         this.incomeRepository = repository;
         this.invoiceRepository = invoiceRepository;
         this.validator = validator;
+        this.bankService = bankService;
+        this.reconciliationService = reconciliationService;
     }
 
     /** Доходы за год: сначала новые. */
@@ -107,11 +113,13 @@ public class IncomeService extends AbstractCrudService<Income, IncomeCreateDto, 
         return entityProvider.create(row);
     }
 
-    /** Без дохода по счёту счёт снова считается неоплаченным: оплату можно отметить заново. */
+    /** Без дохода счёт снова считается неоплаченным (или оплаченным частично): оплату можно отметить заново. */
     @Override
     protected void processEntitiesBeforeDeleting(List<Income> entities) {
-        Set<Long> invoiceIds = entities.stream().map(Income::getInvoiceId).filter(Objects::nonNull).collect(Collectors.toSet());
-        invoiceRepository.findAllById(invoiceIds).forEach((Invoice invoice) -> invoice.setStatus(InvoiceStatus.SENT));
+        reconciliationService.detachIncomes(entities.stream().map(Income::getId).toList());
+        // Доход из банковской операции удалён — операция снова ждёт решения пользователя.
+        bankService.detachIncomes(AuthenticationHolder.getCurrentBusinessIdOrElseThrow(),
+                entities.stream().map(Income::getId).toList());
     }
 
     @Override

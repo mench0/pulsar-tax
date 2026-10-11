@@ -92,9 +92,10 @@ class RulesTest {
 
     @Test
     void rulesByYear() {
-        assertEquals(2026, TaxRules.forYear(2026).fromYear());
-        assertEquals(2026, TaxRules.forYear(2030).fromYear()); // последняя редакция действует дальше
-        assertEquals(2026, TaxRules.forYear(2020).fromYear()); // до первой — берём первую
+        assertEquals(2025, TaxRules.forYear(2026).fromYear());
+        assertEquals(2025, TaxRules.forYear(2030).fromYear()); // последняя редакция действует дальше
+        assertNull(TaxRules.forYear(2024)); // правила не переносятся на годы до первой известной редакции
+        assertNull(TaxRules.ratePercent(profile(TaxRegime.TURNOVER, ActivityType.TRADE), 2024));
     }
 
     @Test
