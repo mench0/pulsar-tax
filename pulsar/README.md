@@ -5,6 +5,9 @@
 В этом репозитории только бэкенд (REST API). Интерфейс (веб, Android, iOS на Flutter) — в отдельном репозитории
 [mench0/pulsar-tax-web](https://github.com/mench0/pulsar-tax-web).
 
+**Пошаговая инструкция по установке и запуску всего — бэкенда, веба, Android, iOS и выкладки на сервер:
+[pulsar-tax-web/docs/SETUP.md](https://github.com/mench0/pulsar-tax-web/blob/main/docs/SETUP.md).**
+
 Первый продукт экосистемы **Pulsar**. MVP для проверки спроса.
 
 ## Что умеет
