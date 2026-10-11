@@ -35,14 +35,17 @@ public class InvoiceService extends AbstractCrudService<Invoice, InvoiceCreateDt
 
     InvoiceRepository invoiceRepository;
     IncomeRepository incomeRepository;
+    ReconciliationService reconciliationService;
 
     public InvoiceService(InvoiceProvider entityProvider,
                           InvoiceRepository repository,
                           InvoiceSearchMapper searchMapper,
-                          IncomeRepository incomeRepository) {
+                          IncomeRepository incomeRepository,
+                          ReconciliationService reconciliationService) {
         super(Invoice.class, entityProvider, repository, repository, searchMapper);
         this.invoiceRepository = repository;
         this.incomeRepository = incomeRepository;
+        this.reconciliationService = reconciliationService;
     }
 
     /** Все счета: сначала новые. */
@@ -77,8 +80,22 @@ public class InvoiceService extends AbstractCrudService<Invoice, InvoiceCreateDt
     /** Отмечает счёт оплаченным и записывает доход на сумму счёта. Повторный вызов ничего не меняет. */
     @Transactional
     public Invoice markPaid(Long id, LocalDate paidOn) {
+        return markPaid(id, paidOn, null, false);
+    }
+
+    /**
+     * Отметка оплаты. С incomeId счёт закрывается уже учтённым доходом (например, из выписки) — новый доход
+     * не создаётся. Без него, если похожее поступление уже есть в доходах, отметка отклоняется, чтобы одна оплата
+     * не попала в оборот дважды; newPayment = true подтверждает, что это другой платёж.
+     */
+    @Transactional
+    public Invoice markPaid(Long id, LocalDate paidOn, Long incomeId, boolean newPayment) {
         Invoice invoice = getByIdOrElseThrow(id);
         assertWriteAccess(id);
+        if (incomeId != null) {
+            reconciliationService.allocate(invoice.getBusinessId(), invoice.getId(), incomeId, null, "MANUAL");
+            return invoiceRepository.findById(id).orElseThrow();
+        }
         if (invoice.getStatus() == InvoiceStatus.PAID) {
             return invoice;
         }
@@ -86,8 +103,15 @@ public class InvoiceService extends AbstractCrudService<Invoice, InvoiceCreateDt
         if (total.signum() <= 0) {
             throw new CustomValidationException("Сумма счёта равна нулю — доход не записать");
         }
-        invoice.setStatus(InvoiceStatus.PAID);
-        incomeRepository.save(Income.builder()
+        if (!newPayment) {
+            var existing = reconciliationService.likelyExistingPayment(invoice.getBusinessId(), invoice);
+            if (existing != null) {
+                throw new DuplicateException("Похоже, оплата уже учтена: доход от " + existing.date() + " на "
+                        + existing.remaining().stripTrailingZeros().toPlainString() + " ֏ (№" + existing.id()
+                        + "). Свяжите его со счётом или подтвердите, что это другой платёж");
+            }
+        }
+        Income income = incomeRepository.save(Income.builder()
                 .businessId(invoice.getBusinessId())
                 .date(paidOn)
                 .amount(total)
@@ -96,7 +120,8 @@ public class InvoiceService extends AbstractCrudService<Invoice, InvoiceCreateDt
                 .description("Оплата по счёту " + invoice.getNumber())
                 .invoiceId(invoice.getId())
                 .build());
-        return invoiceRepository.saveAndFlush(invoice);
+        reconciliationService.allocate(invoice.getBusinessId(), invoice.getId(), income.getId(), total, "INVOICE_PAID");
+        return invoiceRepository.findById(id).orElseThrow();
     }
 
     @Override

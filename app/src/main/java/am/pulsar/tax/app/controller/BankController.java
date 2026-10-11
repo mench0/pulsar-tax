@@ -67,7 +67,14 @@ public class BankController {
     public List<BankTransactionDto> transactions(@RequestParam(required = false) String from,
                                                  @RequestParam(required = false) String to,
                                                  @RequestParam(required = false) String status) {
-        TransactionStatus st = status == null || status.isBlank() ? null : TransactionStatus.valueOf(status);
+        TransactionStatus st = null;
+        if (status != null && !status.isBlank()) {
+            try {
+                st = TransactionStatus.valueOf(status);
+            } catch (IllegalArgumentException e) {
+                throw new am.pulsar.tax.app.exception.CustomValidationException("Неизвестный статус: " + status);
+            }
+        }
         return bankService.list(from == null ? null : RequestUtils.date(from), to == null ? null : RequestUtils.date(to), st);
     }
 

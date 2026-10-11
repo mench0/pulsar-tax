@@ -32,6 +32,8 @@ class ApiTest {
     static void props(DynamicPropertyRegistry r) throws Exception {
         r.add("pulsar.cba-url", Stubs::cbaUrl);
         r.add("pulsar.telegram-token", () -> "TOKEN");
+        // Распознавание изображений проверяется, если tesseract установлен на машине.
+        r.add("pulsar.ocr.tesseract", () -> new java.io.File("/usr/bin/tesseract").canExecute() ? "/usr/bin/tesseract" : "");
         r.add("pulsar.telegram-api", Stubs::telegramUrl);
         r.add("pulsar.allowed-origins", () -> "https://app.pulsar.am/");
         r.add("spring.flyway.placeholders.first_user_email", () -> " Admin@Example.am ");
@@ -395,6 +397,161 @@ class ApiTest {
         assertEquals("MICRO_ANNUAL", m.json("GET", "/api/reports/readiness?year=2026", null).path("type").asString());
         assertEquals(400, c.status("GET", "/api/reports/readiness?year=2026", null)); // для оборота нужен квартал
         assertEquals(404, m.status("GET", "/api/reports/" + id1, null));
+    }
+
+    static String upload(ApiClient c, String name, byte[] content, int expected) throws Exception {
+        String boundary = "pulsar" + System.nanoTime();
+        java.io.ByteArrayOutputStream body = new java.io.ByteArrayOutputStream();
+        body.write(("--" + boundary + "\r\nContent-Disposition: form-data; name=\"file\"; filename=\"" + name
+                + "\"\r\nContent-Type: application/octet-stream\r\n\r\n").getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        body.write(content);
+        body.write(("\r\n--" + boundary + "--\r\n").getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        java.net.http.HttpRequest.Builder b = java.net.http.HttpRequest.newBuilder(java.net.URI.create("http://127.0.0.1:" + c.port() + "/api/documents"))
+                .header("Content-Type", "multipart/form-data; boundary=" + boundary)
+                .header("Cookie", c.cookie)
+                .POST(java.net.http.HttpRequest.BodyPublishers.ofByteArray(body.toByteArray()));
+        HttpResponse<String> r = java.net.http.HttpClient.newHttpClient().send(b.build(), HttpResponse.BodyHandlers.ofString());
+        assertEquals(expected, r.statusCode(), r.body());
+        return r.body();
+    }
+
+    static byte[] pdf(String... lines) throws Exception {
+        try (org.apache.pdfbox.pdmodel.PDDocument doc = new org.apache.pdfbox.pdmodel.PDDocument()) {
+            org.apache.pdfbox.pdmodel.PDPage page = new org.apache.pdfbox.pdmodel.PDPage();
+            doc.addPage(page);
+            try (org.apache.pdfbox.pdmodel.PDPageContentStream cs = new org.apache.pdfbox.pdmodel.PDPageContentStream(doc, page)) {
+                cs.beginText();
+                cs.setFont(new org.apache.pdfbox.pdmodel.font.PDType1Font(org.apache.pdfbox.pdmodel.font.Standard14Fonts.FontName.HELVETICA), 12);
+                cs.newLineAtOffset(50, 700);
+                for (String l : lines) {
+                    cs.showText(l);
+                    cs.newLineAtOffset(0, -18);
+                }
+                cs.endText();
+            }
+            java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+            doc.save(out);
+            return out.toByteArray();
+        }
+    }
+
+    static byte[] png(String... lines) throws Exception {
+        java.awt.image.BufferedImage img = new java.awt.image.BufferedImage(900, 60 + 50 * lines.length, java.awt.image.BufferedImage.TYPE_INT_RGB);
+        java.awt.Graphics2D g = img.createGraphics();
+        g.setColor(java.awt.Color.WHITE);
+        g.fillRect(0, 0, img.getWidth(), img.getHeight());
+        g.setColor(java.awt.Color.BLACK);
+        g.setRenderingHint(java.awt.RenderingHints.KEY_TEXT_ANTIALIASING, java.awt.RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
+        g.setFont(new java.awt.Font(java.awt.Font.SANS_SERIF, java.awt.Font.PLAIN, 32));
+        for (int i = 0; i < lines.length; i++) g.drawString(lines[i], 30, 60 + 50 * i);
+        g.dispose();
+        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+        javax.imageio.ImageIO.write(img, "png", out);
+        return out.toByteArray();
+    }
+
+    @Test
+    void documentsRecognitionConfirmationAndLinks() throws Exception {
+        ApiClient c = client().register("docs@example.am");
+        byte[] hosting = pdf("Hosting LLC  TIN 01234567", "Invoice No. H-2026-05 Date: 2026-05-03", "Total due: 12,500.00 AMD");
+        JsonNode d = ApiClient.JSON.readTree(upload(c, "hosting.pdf", hosting, 201));
+        assertEquals("Hosting LLC", d.path("extracted").path("counterparty").path("value").asString());
+        assertEquals("TEXT_LAYER", d.path("extraction").asString());
+        assertEquals("NEEDS_REVIEW", d.path("status").asString());
+        assertEquals("H-2026-05", d.path("extracted").path("number").path("value").asString());
+        assertEquals(0, new java.math.BigDecimal("12500").compareTo(d.path("extracted").path("amount").path("value").decimalValue()));
+        assertEquals("01234567", d.path("extracted").path("counterpartyTin").path("value").asString());
+        // Пока не подтверждено — подтверждённых значений нет.
+        assertEquals("", d.path("number").asString());
+        assertTrue(d.path("amount").isNull());
+        long id = d.path("id").asLong();
+
+        // Тот же файл повторно — 409; не PDF/PNG/JPEG — 400 (тип определяется по содержимому, не по имени).
+        upload(c, "again.pdf", hosting, 409);
+        upload(c, "evil.pdf", "<script>alert(1)</script>".getBytes(), 400);
+
+        // Банковская операция на ту же сумму уже стала расходом — документ привязывается к нему, второй расход не создаётся.
+        c.json("POST", "/api/bank/statements", statement("", "[\"05.05.2026\",\"-12500\",\"AMD\",\"Hosting LLC\",\"hosting\"]",
+                "[{\"row\":1,\"kind\":\"EXPENSE\"}]"));
+        JsonNode match = c.json("GET", "/api/documents/" + id, null).path("matches").get(0);
+        assertEquals(2, match.path("daysFromDocument").asInt());
+        JsonNode confirmed = c.json("POST", "/api/documents/" + id + "/confirm",
+                "{\"docType\":\"SUPPLIER_INVOICE\",\"number\":\"H-2026-05\",\"date\":\"2026-05-03\",\"currency\":\"AMD\","
+                        + "\"amount\":12500,\"counterparty\":\"Hosting LLC\",\"bankTransactionId\":" + match.path("bankTransactionId").asLong()
+                        + ",\"createExpense\":true}");
+        assertEquals("CONFIRMED", confirmed.path("status").asString());
+        assertEquals(match.path("expenseId").asLong(), confirmed.path("expenseId").asLong());
+        assertEquals(1, c.json("GET", "/api/expenses?year=2026", null).size());
+
+        HttpResponse<String> file = c.call("GET", "/api/documents/" + id + "/file", null);
+        assertEquals("nosniff", file.headers().firstValue("X-Content-Type-Options").orElse(""));
+        assertTrue(file.headers().firstValue("Content-Disposition").orElse("").startsWith("attachment"));
+        assertEquals(404, client().register("docs2@example.am").status("GET", "/api/documents/" + id + "/file", null));
+
+        // Изображение: распознаётся локальным tesseract, если он установлен; иначе честно «распознавание недоступно».
+        JsonNode img = ApiClient.JSON.readTree(upload(c, "receipt.png", png("RECEIPT No 4471", "Date 14.06.2026", "TOTAL 3,200.00 AMD"), 201));
+        if (new java.io.File("/usr/bin/tesseract").canExecute()) {
+            assertEquals("OCR", img.path("extraction").asString());
+            assertEquals(0, new java.math.BigDecimal("3200").compareTo(img.path("extracted").path("amount").path("value").decimalValue()), img.toString());
+        } else {
+            assertEquals("OCR_UNAVAILABLE", img.path("extraction").asString());
+        }
+        assertEquals(2, c.json("GET", "/api/documents", null).size());
+        assertEquals(204, c.status("DELETE", "/api/documents/" + img.path("id").asLong(), null));
+    }
+
+    @Test
+    void reconciliationPartialPaymentsAndNoDoubleIncome() throws Exception {
+        ApiClient c = client().register("recon@example.am");
+        JsonNode inv = c.json("POST", "/api/invoices",
+                "{\"client\":\"ООО Ромашка\",\"date\":\"2026-04-01\",\"dueDate\":\"2026-04-30\",\"items\":[{\"name\":\"Работа\",\"quantity\":1,\"price\":100000}]}");
+        long invoice = inv.path("id").asLong();
+        String number = inv.path("number").asString();
+        // Две оплаты из выписки: 60 000 и 40 000 с номером счёта в назначении.
+        c.json("POST", "/api/bank/statements", statement("",
+                "[\"05.04.2026\",\"60000\",\"AMD\",\"ООО Ромашка\",\"Оплата по счету " + number + "\"],"
+                        + "[\"20.04.2026\",\"40000\",\"AMD\",\"ООО Ромашка\",\"Оплата по счету " + number + " остаток\"]",
+                "[{\"row\":1,\"kind\":\"INCOME\"},{\"row\":2,\"kind\":\"INCOME\"}]"));
+
+        JsonNode o = c.json("GET", "/api/reconciliation", null);
+        assertEquals("OPEN", o.path("invoices").get(0).path("state").asString());
+        assertTrue(o.path("invoices").get(0).path("overdue").asBoolean());
+        assertEquals(100000, o.path("overdue").asInt());
+        assertEquals(2, o.path("unmatchedIncomes").size());
+        JsonNode sg = o.path("suggestions").get(0);
+        assertTrue(sg.path("reasons").toString().contains("NUMBER_IN_DESCRIPTION"));
+
+        // «Счёт оплачен» без связи с поступлениями отклоняется: оплата уже есть в доходах.
+        long first = o.path("unmatchedIncomes").get(0).path("id").asLong();
+        long second = o.path("unmatchedIncomes").get(1).path("id").asLong();
+        c.json("POST", "/api/reconciliation/allocations", "{\"invoiceId\":" + invoice + ",\"incomeId\":" + first + "}");
+        JsonNode partial = c.json("GET", "/api/reconciliation", null).path("invoices").get(0);
+        assertEquals("PARTIAL", partial.path("state").asString());
+        assertEquals(40000, partial.path("balance").asInt());
+        assertEquals(409, c.status("POST", "/api/invoices/" + invoice + "/paid?date=2026-04-21", null));
+        // Связываем второе поступление через «Счёт оплачен» — новый доход не создаётся.
+        assertEquals("PAID", c.json("POST", "/api/invoices/" + invoice + "/paid?incomeId=" + second, null).path("status").asString());
+        assertEquals(2, c.json("GET", "/api/incomes?year=2026", null).size());
+        JsonNode paid = c.json("GET", "/api/reconciliation", null);
+        assertEquals("PAID", paid.path("invoices").get(0).path("state").asString());
+        assertEquals(0, paid.path("unmatchedIncomes").size());
+        assertEquals(0, paid.path("receivable").asInt());
+
+        // Один доход нельзя распределить дважды сверх его суммы.
+        JsonNode inv2 = c.json("POST", "/api/invoices", "{\"client\":\"Б\",\"date\":\"2026-04-02\",\"items\":[{\"name\":\"x\",\"quantity\":1,\"price\":5}]}");
+        assertEquals("Доход уже полностью распределён по счетам",
+                c.error("POST", "/api/reconciliation/allocations", "{\"invoiceId\":" + inv2.path("id").asLong() + ",\"incomeId\":" + first + "}"));
+
+        // Отмена сопоставления возвращает счёт в частично оплаченные; удаление дохода — тоже.
+        long allocation = paid.path("invoices").get(0).path("payments").get(1).path("id").asLong();
+        assertEquals(204, c.status("DELETE", "/api/reconciliation/allocations/" + allocation, null));
+        assertEquals("SENT", c.json("GET", "/api/invoices/" + invoice, null).path("status").asString());
+        assertEquals(204, c.status("DELETE", "/api/incomes/" + first, null));
+        assertEquals("OPEN", c.json("GET", "/api/reconciliation", null).path("invoices").get(0).path("state").asString());
+
+        // Без похожего поступления «Счёт оплачен» по-прежнему записывает доход.
+        long inv2id = inv2.path("id").asLong();
+        assertEquals("PAID", c.json("POST", "/api/invoices/" + inv2id + "/paid?date=2026-04-03", null).path("status").asString());
     }
 
     @Test

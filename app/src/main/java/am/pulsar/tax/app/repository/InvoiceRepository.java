@@ -11,4 +11,6 @@ public interface InvoiceRepository extends JpaRepository<Invoice, Long>, Queryds
 
     @Query("select i.number from Invoice i where i.businessId = :businessId and i.number like concat(:prefix, '%')")
     List<String> numbersStartingWith(Long businessId, String prefix);
+
+    java.util.List<am.pulsar.tax.app.entity.Invoice> findByBusinessIdOrderByDateAscIdAsc(Long businessId);
 }
