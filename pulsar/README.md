@@ -40,25 +40,29 @@
 ## Стек
 
 Java 21, Spring Boot 4 (Web MVC, Security, Data JPA), Hibernate, PostgreSQL, миграции Flyway.
-Модульный монолит: один процесс и одна база, код разделён на модули по предметным областям.
+Монолит: один процесс и одна база, классы разложены по пакетам по роли (контроллеры, сервисы, сущности и т. д.).
 
 ## Запуск для разработки
 
-Нужна только **Java 21+**: Maven скачается сам (`mvnw`), PostgreSQL тоже. Если адрес базы
-(`PULSAR_DB_URL`) не задан, приложение поднимает встроенный PostgreSQL в `PULSAR_DATA_DIR/pg`.
+Нужны **Java 21+** и **PostgreSQL 14+** (Maven скачается сам через `mvnw`). Проще всего поднять базу в Docker:
 
 ```bash
 cd pulsar
+docker compose up -d db       # PostgreSQL на localhost:5432, база и пользователь pulsar, пароль pulsar
 ./mvnw verify                 # тесты и сборка target/pulsar-tax.jar
 java -jar target/pulsar-tax.jar
 ```
+
+Без Docker установите PostgreSQL и создайте базу:
+`createuser -P pulsar` (пароль `pulsar`) и `createdb -O pulsar pulsar`. Другая база —
+через `PULSAR_DB_URL`, `PULSAR_DB_USER`, `PULSAR_DB_PASSWORD`.
 
 В Windows — `mvnw.cmd verify`. API отвечает на http://127.0.0.1:8080. Интерфейс запускается из репозитория
 pulsar-tax-web (см. его README): пока API слушает только 127.0.0.1, он принимает запросы фронтенда с любого
 локального порта.
 
-Встроенный PostgreSQL не запускается от root (так устроен сам PostgreSQL) — запускайте приложение и тесты
-от обычного пользователя.
+Тестам бэкенда своя база не нужна: они поднимают временный PostgreSQL на время прогона (только в тестах,
+в jar его нет). Временный PostgreSQL не запускается от root — запускайте тесты от обычного пользователя.
 
 ## Выкладка на сервер
 
@@ -72,7 +76,7 @@ PULSAR_HOST=0.0.0.0 PULSAR_SECURE_COOKIE=1 PULSAR_ALLOWED_ORIGINS=https://app.pu
 java -jar pulsar-tax.jar
 ```
 
-Или в Docker вместе с базой: `docker compose up -d` (см. `docker-compose.yml`, смените пароль).
+Или в Docker вместе с базой: `PULSAR_DB_PASSWORD=свой-пароль docker compose up -d` (см. `docker-compose.yml`).
 Проверка работоспособности для балансировщика: `GET /actuator/health`.
 
 Резервная копия: `pg_dump -Fc pulsar > pulsar-$(date +%F).dump`, восстановление — `pg_restore -d pulsar файл`.
@@ -83,18 +87,29 @@ java -jar pulsar-tax.jar
 |---|---|---|
 | `PULSAR_PORT` | `8080` | Порт |
 | `PULSAR_HOST` | `127.0.0.1` | Адрес. `0.0.0.0` откроет доступ из сети |
-| `PULSAR_DB_URL` | — | Адрес базы, например `jdbc:postgresql://localhost:5432/pulsar`. Пусто — встроенный PostgreSQL |
-| `PULSAR_DB_USER`, `PULSAR_DB_PASSWORD` | — | Пользователь и пароль базы |
-| `PULSAR_DATA_DIR` | `data` | Папка встроенной базы (только без `PULSAR_DB_URL`) |
+| `PULSAR_DB_URL` | `jdbc:postgresql://localhost:5432/pulsar` | Адрес базы PostgreSQL |
+| `PULSAR_DB_USER`, `PULSAR_DB_PASSWORD` | `pulsar`, `pulsar` | Пользователь и пароль базы. На сервере задайте свой пароль |
 | `PULSAR_SIGNUP` | `open` | `closed` — регистрация закрыта, войти могут только существующие пользователи (первого можно создать всегда) |
 | `PULSAR_SECURE_COOKIE` | `0` | `1`, если сервер работает за HTTPS: cookie сессии получит флаг `Secure` |
 | `PULSAR_TELEGRAM_TOKEN` | — | Токен бота от @BotFather. Без него напоминания в Telegram выключены |
 | `PULSAR_ALLOWED_ORIGINS` | — | Адреса фронтенда через запятую, например `https://app.pulsar.am`. Им разрешены запросы с cookie (CORS) |
 | `PULSAR_CBA_URL` | `https://api.cba.am/exchangerates.asmx` | API курсов ЦБ РА |
 | `PULSAR_COOKIE_SAMESITE` | `Strict` | `Strict` — фронтенд на том же сайте (поддомен); `None` — на другом домене, требует `PULSAR_SECURE_COOKIE=1` |
+| `PULSAR_FIRST_USER_EMAIL`, `PULSAR_FIRST_USER_PASSWORD` | — | Создать первого пользователя при запуске (миграция `R__FirstUser`), например при `PULSAR_SIGNUP=closed` |
 | `PULSAR_IMPORT_LEGACY` | — | Папка данных старой версии на файлах — перенести в базу при запуске |
 
 Сроки и «сегодня» считаются по времени Еревана, где бы ни стоял сервер.
+
+### Первый пользователь
+
+Миграция `src/main/java/db/migration/R__FirstUser.java` создаёт пользователя из `PULSAR_FIRST_USER_EMAIL` и
+`PULSAR_FIRST_USER_PASSWORD` (не короче 8 символов) вместе с пустым профилем ИП. Пароль в репозитории не
+хранится — в базу попадает только хэш. Миграция повторяемая: Flyway запускает её снова, только когда
+меняется почта; существующего пользователя она не трогает и пароль не сбрасывает. После первого запуска
+пароль можно убрать из окружения и сменить в приложении.
+
+Перенос старых данных (`PULSAR_IMPORT_LEGACY`) идёт только в пустую базу — не задавайте его вместе с первым
+пользователем.
 
 ### Переход со старой версии (данные в JSON-файлах)
 
@@ -122,20 +137,21 @@ java -jar pulsar-tax.jar
 ```
 src/main/java/am/pulsar/tax/
   PulsarApplication.java  точка входа
-  identity/      учётные записи, пароли, сессии (cookie и Bearer), Spring Security, /api/auth, /api/account
-  business/      профиль ИП
-  accounting/    доходы, импорт выписок, расходы, сохранённые колонки выписок
-  tax/           налоговые правила по годам (TaxRules), годовая сводка (Summary), уплаты
-  invoicing/     счета: позиции, автономер, оплата, номер e-invoice
-  reminders/     сроки: календарь .ics, тексты напоминаний на трёх языках, бот Telegram, рассылка
-  integrations/  курсы ЦБ РА с кэшем в базе
-  export/        выгрузка JSON и CSV
-  legacy/        перенос данных версии на файлах
-  web/           CORS и защита от чужих сайтов, ошибки {"error": ...}, встроенный PostgreSQL
-  shared/        настройки, проверка полей запроса, перечисления, время Еревана
+  controller/   REST API: вход и учётная запись, профиль, доходы и расходы, счета, налог, курсы, экспорт, календарь
+  service/      бизнес-операции и транзакции: учётные записи, профиль ИП, учёт, счета, налог
+  entity/       сущности JPA (таблицы базы) и перечисления
+  repository/   репозитории Spring Data JPA
+  domain/       чистые расчёты без базы: налоговые правила (TaxRules), сводка (Summary), сроки и напоминания
+                (Deadlines), CSV
+  client/       внешние API: курсы ЦБ РА с кэшем в базе, бот Telegram
+  security/     Spring Security, сессии (cookie и Bearer), пароли, CORS и защита от чужих сайтов
+  config/       настройки PULSAR_*, Jackson, фильтры
+  job/          рассылка напоминаний по расписанию, перенос данных старой версии при запуске
+  exception/    ApiException и ответы {"error": ...}
+  util/         разбор и проверка полей запроса, время Еревана
 src/main/resources/
   application.yml         настройки
-  db/migration/           миграции Flyway
+  db/migration/           миграции Flyway (SQL); Java-миграции — в src/main/java/db/migration
 src/test/java/am/pulsar/tax/
   RulesTest.java          налоги, сводка, сроки, CSV, разбор чисел и курсов
   ApiTest.java            API целиком на настоящем PostgreSQL с заглушками ЦБ РА и Telegram
@@ -182,7 +198,7 @@ src/test/java/am/pulsar/tax/
 
 ## Важно про налоги
 
-Пороги, ставки и ограничения по видам деятельности (`tax/TaxRules.java`) хранятся по годам
+Пороги, ставки и ограничения по видам деятельности (`domain/TaxRules.java`) хранятся по годам
 и взяты из открытых обзоров на 2026 год: микробизнес до 24 млн ֏, налог с оборота до 115 млн ֏,
 ставка 10% для торговли и услуг, 1% для компаний из реестра High-Tech. Микробизнес недоступен
 консультациям, юридическим и бухгалтерским услугам, инжинирингу, рекламе, дизайну и переводу;
@@ -193,7 +209,7 @@ src/test/java/am/pulsar/tax/
 срок годового отчёта микробизнеса, шаги подачи в file-online и требования к электронным счетам.
 Общая система (НДС) в MVP не рассчитывается.
 
-Тексты напоминаний и календаря на армянском (`reminders/Deadlines.java`) сделаны без носителя языка — их нужно вычитать.
+Тексты напоминаний и календаря на армянском (`domain/Deadlines.java`) сделаны без носителя языка — их нужно вычитать.
 
 ## Что дальше
 

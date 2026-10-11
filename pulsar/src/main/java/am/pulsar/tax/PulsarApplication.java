@@ -8,10 +8,10 @@ import org.springframework.scheduling.annotation.EnableScheduling;
 /**
  * Pulsar Tax API — модульный монолит.
  *
- * Модули (пакеты): identity — вход и сессии; business — профиль ИП; accounting — доходы, расходы,
- * импорт выписок; tax — налоговые правила, сводка, уплаты; invoicing — счета; reminders — сроки,
- * календарь, Telegram; integrations — внешние API (ЦБ РА); export — выгрузки; legacy — перенос данных
- * старой версии; shared и web — общее.
+ * Пакеты по роли классов: controller — REST API; service — бизнес-операции и транзакции; entity — сущности
+ * JPA; repository — доступ к базе; domain — чистые расчёты (налоги, сводка, сроки, CSV); client — внешние API
+ * (ЦБ РА, Telegram); security — вход, сессии, защита от чужих сайтов; config — настройки и бины; job — задачи
+ * по расписанию и при запуске; exception — ошибки и их ответы; util — разбор полей, время Еревана.
  */
 @SpringBootApplication
 @ConfigurationPropertiesScan
