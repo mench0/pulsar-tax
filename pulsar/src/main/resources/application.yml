@@ -29,6 +29,10 @@ spring:
         jdbc.time_zone: UTC
   flyway:
     locations: classpath:db/migration
+    placeholders:
+      # Первый пользователь (миграция R__FirstUser). Пусто — не создаётся.
+      first_user_email: ${PULSAR_FIRST_USER_EMAIL:}
+      first_user_password: ${PULSAR_FIRST_USER_PASSWORD:}
   jackson:
     deserialization:
       use-big-decimal-for-floats: true

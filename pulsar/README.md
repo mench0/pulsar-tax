@@ -95,9 +95,21 @@ java -jar pulsar-tax.jar
 | `PULSAR_ALLOWED_ORIGINS` | — | Адреса фронтенда через запятую, например `https://app.pulsar.am`. Им разрешены запросы с cookie (CORS) |
 | `PULSAR_CBA_URL` | `https://api.cba.am/exchangerates.asmx` | API курсов ЦБ РА |
 | `PULSAR_COOKIE_SAMESITE` | `Strict` | `Strict` — фронтенд на том же сайте (поддомен); `None` — на другом домене, требует `PULSAR_SECURE_COOKIE=1` |
+| `PULSAR_FIRST_USER_EMAIL`, `PULSAR_FIRST_USER_PASSWORD` | — | Создать первого пользователя при запуске (миграция `R__FirstUser`), например при `PULSAR_SIGNUP=closed` |
 | `PULSAR_IMPORT_LEGACY` | — | Папка данных старой версии на файлах — перенести в базу при запуске |
 
 Сроки и «сегодня» считаются по времени Еревана, где бы ни стоял сервер.
+
+### Первый пользователь
+
+Миграция `src/main/java/db/migration/R__FirstUser.java` создаёт пользователя из `PULSAR_FIRST_USER_EMAIL` и
+`PULSAR_FIRST_USER_PASSWORD` (не короче 8 символов) вместе с пустым профилем ИП. Пароль в репозитории не
+хранится — в базу попадает только хэш. Миграция повторяемая: Flyway запускает её снова, только когда
+меняется почта; существующего пользователя она не трогает и пароль не сбрасывает. После первого запуска
+пароль можно убрать из окружения и сменить в приложении.
+
+Перенос старых данных (`PULSAR_IMPORT_LEGACY`) идёт только в пустую базу — не задавайте его вместе с первым
+пользователем.
 
 ### Переход со старой версии (данные в JSON-файлах)
 
@@ -139,7 +151,7 @@ src/main/java/am/pulsar/tax/
   util/         разбор и проверка полей запроса, время Еревана
 src/main/resources/
   application.yml         настройки
-  db/migration/           миграции Flyway
+  db/migration/           миграции Flyway (SQL); Java-миграции — в src/main/java/db/migration
 src/test/java/am/pulsar/tax/
   RulesTest.java          налоги, сводка, сроки, CSV, разбор чисел и курсов
   ApiTest.java            API целиком на настоящем PostgreSQL с заглушками ЦБ РА и Telegram
