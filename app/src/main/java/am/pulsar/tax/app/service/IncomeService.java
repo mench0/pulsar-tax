@@ -39,16 +39,19 @@ public class IncomeService extends AbstractCrudService<Income, IncomeCreateDto, 
     IncomeRepository incomeRepository;
     InvoiceRepository invoiceRepository;
     Validator validator;
+    BankService bankService;
 
     public IncomeService(IncomeProvider entityProvider,
                          IncomeRepository repository,
                          IncomeSearchMapper searchMapper,
                          InvoiceRepository invoiceRepository,
-                         Validator validator) {
+                         Validator validator,
+                         BankService bankService) {
         super(Income.class, entityProvider, repository, repository, searchMapper);
         this.incomeRepository = repository;
         this.invoiceRepository = invoiceRepository;
         this.validator = validator;
+        this.bankService = bankService;
     }
 
     /** Доходы за год: сначала новые. */
@@ -112,6 +115,9 @@ public class IncomeService extends AbstractCrudService<Income, IncomeCreateDto, 
     protected void processEntitiesBeforeDeleting(List<Income> entities) {
         Set<Long> invoiceIds = entities.stream().map(Income::getInvoiceId).filter(Objects::nonNull).collect(Collectors.toSet());
         invoiceRepository.findAllById(invoiceIds).forEach((Invoice invoice) -> invoice.setStatus(InvoiceStatus.SENT));
+        // Доход из банковской операции удалён — операция снова ждёт решения пользователя.
+        bankService.detachIncomes(AuthenticationHolder.getCurrentBusinessIdOrElseThrow(),
+                entities.stream().map(Income::getId).toList());
     }
 
     @Override

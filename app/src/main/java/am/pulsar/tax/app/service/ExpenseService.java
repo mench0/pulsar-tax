@@ -20,10 +20,21 @@ import java.util.List;
 @FieldDefaults(level = AccessLevel.PRIVATE, makeFinal = true)
 public class ExpenseService extends AbstractCrudService<Expense, ExpenseCreateDto, ExpensePatchDto, ExpenseFilterDto> {
 
+    BankService bankService;
+
     public ExpenseService(ExpenseProvider entityProvider,
                      ExpenseRepository repository,
-                     ExpenseSearchMapper searchMapper) {
+                     ExpenseSearchMapper searchMapper,
+                     BankService bankService) {
         super(Expense.class, entityProvider, repository, repository, searchMapper);
+        this.bankService = bankService;
+    }
+
+    /** Расход из банковской операции удалён — операция снова ждёт решения пользователя. */
+    @Override
+    protected void processEntitiesBeforeDeleting(List<Expense> entities) {
+        bankService.detachExpenses(AuthenticationHolder.getCurrentBusinessIdOrElseThrow(),
+                entities.stream().map(Expense::getId).toList());
     }
 
     /** Записи за год: сначала новые. */

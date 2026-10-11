@@ -15,4 +15,7 @@ public interface IncomeRepository extends JpaRepository<Income, Long>, QuerydslP
 
     @Query("select i.importKey from Income i where i.businessId = :businessId and i.importKey is not null")
     Set<String> importKeys(Long businessId);
+
+    /** Есть ли введённый вручную (не из выписки) доход с той же датой и суммой — возможный дубль. */
+    boolean existsByBusinessIdAndDateAndAmountAndImportKeyIsNull(Long businessId, java.time.LocalDate date, java.math.BigDecimal amount);
 }
